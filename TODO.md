@@ -18,10 +18,9 @@
 
 ### Phase 1: 即座に試せる（難易度: 低）
 
-- [ ] **量子化モデル試行**
-  - `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit`
-  - 期待: メモリ 1/4、速度 1.5-2x
-  - 方法: モデルID変更のみ
+- [x] **量子化モデル試行** ❌ 失敗
+  - mlx-community モデルは MLX 形式（PyTorch 非互換）
+  - PyTorch 動的量子化は pickle エラー
 
 - [ ] **生成パラメータ最適化**
   - `max_new_tokens` 削減
@@ -34,11 +33,14 @@
 
 ### Phase 2: コード修正必要（難易度: 中）
 
-- [ ] **ハイブリッド MPS/CPU 実行**
-  - LLM推論: MPS (GPU) - 現状動作確認済み
-  - Audio Decoder: CPU only (65536ch制限回避)
-  - 期待: 3-5x 高速化
-  - 実装: qwen_tts のソース修正 or monkey patch
+- [x] **ハイブリッド MPS/CPU 実行** ❌ 失敗
+  - MPS + float16 で数値エラー (inf/nan)
+  - MPS + bfloat16 は非対応
+  - 根本的な解決にはデコーダー分割が必要
+
+- [x] **torch.compile() 適用** ❌ 逆効果
+  - 37.9秒（2.37倍遅くなった）
+  - オーバーヘッドが大きすぎ
 
 - [ ] **Audio Decoder 分割処理**
   - conv1d を小さいチャンクに分割

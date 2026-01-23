@@ -41,3 +41,6 @@ Thumbs.db
 # Model cache (large)
 .cache/
 models/
+
+# Claude Code internal
+data/

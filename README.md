@@ -20,13 +20,14 @@ Qwen3-TTS を CUDA なしで動作させる最適化実装。
 | 1.7B + fp32 | 367秒 | 推定30分+ |
 | **0.6B + bf16** | **16秒** | **98秒** |
 
-### MLX Decoder (新規) 🚀
+### MLX Pipeline (新規) 🚀
 
 | Component | PyTorch | MLX | Speedup |
 |-----------|---------|-----|---------|
-| Audio Decoder | 93.85s | 2.07s | **45.34x** |
+| Audio Decoder only | 93.85s | 2.07s | **45.34x** |
+| Quantizer + Decoder | 47.56s | 6.97s | **6.83x** |
 
-> Note: MLX Decoder は現在 standalone テスト。フル統合は WIP。
+> Note: pre_transformer (0.24s, <0.5%) は未移植。実用上の影響は軽微。
 
 ## 🚀 インストール
 
@@ -95,9 +96,9 @@ Total: 39.7秒 の内訳
 | Component | Status | Speedup |
 |-----------|--------|---------|
 | Audio Decoder (conv1d) | ✅ 完了 | 45x |
+| Quantizer | ✅ 完了 | 3.5x |
 | Weight Converter | ✅ 完了 | - |
-| Quantizer | 🚧 WIP | - |
-| Pre-Transformer | 🚧 WIP | - |
+| Pre-Transformer | 📌 低優先度 | (0.24s, <0.5%) |
 
 ### 利用可能なスピーカー
 
@@ -123,8 +124,10 @@ Total: 39.7秒 の内訳
 └── src/
     ├── eris_voice.py          # メインモジュール
     ├── mlx_decoder_v2.py      # MLX Audio Decoder 🔥
+    ├── mlx_quantizer.py       # MLX Quantizer 🆕
     ├── weight_converter.py    # PyTorch → MLX 変換
-    ├── hybrid_execution.py    # ハイブリッド実行テスト
+    ├── hybrid_execution.py    # ハイブリッド実行テスト v1
+    ├── hybrid_execution_v2.py # ハイブリッド実行テスト v2 🆕
     └── param_optimization_test.py  # パラメータ最適化
 ```
 

@@ -1,7 +1,7 @@
 """
-PyTorch → MLX Weight Converter for Qwen3-TTS Audio Decoder
+PyTorch → MLX Weight Converter for Qwen3-TTS
 
-PyTorch の decoder weights を MLX 形式に変換する。
+PyTorch の decoder/quantizer weights を MLX 形式に変換する。
 """
 
 import torch
@@ -142,6 +142,47 @@ def extract_decoder_weights(pytorch_model) -> Dict[str, Any]:
     return weights
 
 
+def extract_quantizer_weights(pytorch_model) -> Dict[str, Any]:
+    """
+    Extract quantizer weights from PyTorch Qwen3-TTS model.
+
+    Returns a dictionary with MLX-compatible weights.
+    """
+    quantizer = pytorch_model.model.speech_tokenizer.model.decoder.quantizer
+
+    weights = {}
+
+    # rvq_first
+    weights["rvq_first.input_proj.weight"] = convert_conv1d_weight(
+        quantizer.rvq_first.input_proj.weight
+    )
+    weights["rvq_first.output_proj.weight"] = convert_conv1d_weight(
+        quantizer.rvq_first.output_proj.weight
+    )
+
+    for i, layer in enumerate(quantizer.rvq_first.vq.layers):
+        cb = layer._codebook
+        prefix = f"rvq_first.vq.layers.{i}"
+        weights[f"{prefix}.embedding_sum"] = pytorch_to_mlx(cb.embedding_sum)
+        weights[f"{prefix}.cluster_usage"] = pytorch_to_mlx(cb.cluster_usage)
+
+    # rvq_rest
+    weights["rvq_rest.input_proj.weight"] = convert_conv1d_weight(
+        quantizer.rvq_rest.input_proj.weight
+    )
+    weights["rvq_rest.output_proj.weight"] = convert_conv1d_weight(
+        quantizer.rvq_rest.output_proj.weight
+    )
+
+    for i, layer in enumerate(quantizer.rvq_rest.vq.layers):
+        cb = layer._codebook
+        prefix = f"rvq_rest.vq.layers.{i}"
+        weights[f"{prefix}.embedding_sum"] = pytorch_to_mlx(cb.embedding_sum)
+        weights[f"{prefix}.cluster_usage"] = pytorch_to_mlx(cb.cluster_usage)
+
+    return weights
+
+
 def save_mlx_weights(weights: Dict[str, mx.array], path: str) -> None:
     """Save MLX weights to file."""
     mx.savez(path, **weights)
@@ -155,7 +196,7 @@ def load_mlx_weights(path: str) -> Dict[str, mx.array]:
 
 
 if __name__ == "__main__":
-    print("=== Weight Converter Test ===")
+    print("=== Weight Converter ===")
 
     # Load PyTorch model
     from qwen_tts import Qwen3TTSModel
@@ -167,15 +208,24 @@ if __name__ == "__main__":
         dtype=torch.bfloat16,
     )
 
-    # Extract weights
-    print("Extracting decoder weights...")
-    weights = extract_decoder_weights(model)
+    # Extract decoder weights
+    print("\n1. Extracting decoder weights...")
+    decoder_weights = extract_decoder_weights(model)
+    print(f"   Extracted {len(decoder_weights)} decoder weight tensors")
 
-    print(f"Extracted {len(weights)} weight tensors:")
-    for name, w in list(weights.items())[:10]:
-        print(f"  {name}: {w.shape}")
-    print("  ...")
+    # Save decoder weights
+    save_mlx_weights(decoder_weights, "decoder_weights_mlx.npz")
 
-    # Save weights
-    output_path = "decoder_weights_mlx.npz"
-    save_mlx_weights(weights, output_path)
+    # Extract quantizer weights
+    print("\n2. Extracting quantizer weights...")
+    quantizer_weights = extract_quantizer_weights(model)
+    print(f"   Extracted {len(quantizer_weights)} quantizer weight tensors")
+
+    for name, w in list(quantizer_weights.items())[:5]:
+        print(f"     {name}: {w.shape}")
+    print("     ...")
+
+    # Save quantizer weights
+    save_mlx_weights(quantizer_weights, "quantizer_weights_mlx.npz")
+
+    print("\nDone!")

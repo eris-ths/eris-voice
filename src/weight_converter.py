@@ -102,8 +102,10 @@ def extract_decoder_weights(pytorch_model) -> Dict[str, Any]:
 
         elif hasattr(block, "block"):
             # DecoderBlock with transconv and residual units
-            # First is SnakeBeta activation (has beta parameter)
+            # First is SnakeBeta activation (has alpha and beta parameters)
             snake = block.block[0]
+            if hasattr(snake, "alpha"):
+                weights[f"{block_name}.act.alpha"] = pytorch_to_mlx(snake.alpha)
             if hasattr(snake, "beta"):
                 weights[f"{block_name}.act.beta"] = pytorch_to_mlx(snake.beta)
 
@@ -120,6 +122,8 @@ def extract_decoder_weights(pytorch_model) -> Dict[str, Any]:
             for j, unit in enumerate(block.block[2:]):
                 unit_name = f"{block_name}.residual.{j}"
                 if hasattr(unit, "act1"):
+                    if hasattr(unit.act1, "alpha"):
+                        weights[f"{unit_name}.act1.alpha"] = pytorch_to_mlx(unit.act1.alpha)
                     weights[f"{unit_name}.act1.beta"] = pytorch_to_mlx(unit.act1.beta)
                     weights[f"{unit_name}.conv1.weight"] = convert_conv1d_weight(
                         unit.conv1.conv.weight
@@ -127,6 +131,8 @@ def extract_decoder_weights(pytorch_model) -> Dict[str, Any]:
                     weights[f"{unit_name}.conv1.bias"] = pytorch_to_mlx(
                         unit.conv1.conv.bias
                     )
+                    if hasattr(unit.act2, "alpha"):
+                        weights[f"{unit_name}.act2.alpha"] = pytorch_to_mlx(unit.act2.alpha)
                     weights[f"{unit_name}.act2.beta"] = pytorch_to_mlx(unit.act2.beta)
                     weights[f"{unit_name}.conv2.weight"] = convert_conv1d_weight(
                         unit.conv2.conv.weight
@@ -136,7 +142,9 @@ def extract_decoder_weights(pytorch_model) -> Dict[str, Any]:
                     )
 
         elif hasattr(block, "beta"):
-            # SnakeBeta activation
+            # SnakeBeta activation (final activation)
+            if hasattr(block, "alpha"):
+                weights[f"{block_name}.alpha"] = pytorch_to_mlx(block.alpha)
             weights[f"{block_name}.beta"] = pytorch_to_mlx(block.beta)
 
     return weights

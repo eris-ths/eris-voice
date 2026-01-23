@@ -12,22 +12,30 @@ from typing import Dict, List, Optional, Tuple
 
 
 class SnakeBetaMLX(nn.Module):
-    """Snake activation with learnable beta parameter."""
+    """Snake activation with learnable alpha and beta parameters."""
 
     def __init__(self, channels: int):
         super().__init__()
-        self.alpha = 1.0
-        # beta shape: (1, channels, 1) for broadcasting
-        self.beta = mx.ones((1, channels, 1))
+        # Both alpha and beta are learnable in PyTorch version
+        self.alpha = mx.ones((channels,))
+        self.beta = mx.ones((channels,))
 
     def __call__(self, x):
-        # Ensure beta has correct shape for broadcasting
+        # Reshape for broadcasting: (channels,) -> (1, channels, 1)
+        alpha = self.alpha
         beta = self.beta
+
+        if alpha.ndim == 1:
+            alpha = alpha.reshape(1, -1, 1)
         if beta.ndim == 1:
             beta = beta.reshape(1, -1, 1)
-        elif beta.ndim == 2:
-            beta = beta.reshape(1, beta.shape[0], 1)
-        return x + (1.0 / (beta + 1e-9)) * mx.power(mx.sin(self.alpha * x), 2)
+
+        # IMPORTANT: alpha and beta are stored in log scale, need exp()
+        alpha = mx.exp(alpha)
+        beta = mx.exp(beta)
+
+        # Snake activation: x + (1/beta) * sin(alpha * x)^2
+        return x + (1.0 / (beta + 1e-9)) * mx.power(mx.sin(alpha * x), 2)
 
 
 class CausalConv1dMLX(nn.Module):
@@ -310,7 +318,9 @@ class Qwen3TTSDecoderMLX(nn.Module):
         for i, block in enumerate(self.decoder_blocks):
             prefix = f"decoder.{i+1}"
 
-            # Activation beta
+            # Activation alpha and beta
+            if f"{prefix}.act.alpha" in weights:
+                block.act.alpha = weights[f"{prefix}.act.alpha"]
             if f"{prefix}.act.beta" in weights:
                 block.act.beta = weights[f"{prefix}.act.beta"]
 
@@ -321,15 +331,22 @@ class Qwen3TTSDecoderMLX(nn.Module):
             # Residual units
             for j, unit in enumerate(block.residual_units):
                 unit_prefix = f"{prefix}.residual.{j}"
+                if f"{unit_prefix}.act1.alpha" in weights:
+                    unit.act1.alpha = weights[f"{unit_prefix}.act1.alpha"]
                 if f"{unit_prefix}.act1.beta" in weights:
                     unit.act1.beta = weights[f"{unit_prefix}.act1.beta"]
                     unit.conv1.weight = weights[f"{unit_prefix}.conv1.weight"]
                     unit.conv1.bias = weights[f"{unit_prefix}.conv1.bias"]
+                if f"{unit_prefix}.act2.alpha" in weights:
+                    unit.act2.alpha = weights[f"{unit_prefix}.act2.alpha"]
+                if f"{unit_prefix}.act2.beta" in weights:
                     unit.act2.beta = weights[f"{unit_prefix}.act2.beta"]
                     unit.conv2.weight = weights[f"{unit_prefix}.conv2.weight"]
                     unit.conv2.bias = weights[f"{unit_prefix}.conv2.bias"]
 
         # decoder[5] - final activation
+        if "decoder.5.alpha" in weights:
+            self.final_act.alpha = weights["decoder.5.alpha"]
         if "decoder.5.beta" in weights:
             self.final_act.beta = weights["decoder.5.beta"]
 

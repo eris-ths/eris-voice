@@ -9,6 +9,88 @@ Achieves **14.8x speedup** through MLX hybrid pipeline.
 
 > ⚠️ **Experimental Software**: This is a research project. See [Disclaimer](#disclaimer) before use.
 
+> 💡 **Note**: If you're on **macOS 15.1+**, the simpler MPS approach may now work. See [MPS Alternative](#mps-alternative-macos-151) below.
+
+---
+
+## Why This Project?
+
+### The Problem
+
+[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) is an excellent open-source TTS model with voice cloning capabilities. However:
+
+- **CUDA-centric**: Designed for NVIDIA GPUs
+- **Unusable on Mac**: 98 seconds for 28 characters on CPU
+- **MPS limitations**: Conv1d >65536 channels caused incorrect results (fixed in macOS 15.1+)
+
+### MPS Alternative (macOS 15.1+)
+
+As of [PyTorch #129207](https://github.com/pytorch/pytorch/issues/129207), the MPS conv1d issue has been fixed:
+
+- **macOS 15.1+**: MPS kernel fix by Apple
+- **PyTorch 2.6.0+**: Conv1d >65536ch support restored
+
+If you're on macOS 15.1+, the simple MPS approach may work:
+
+```python
+model = Qwen3TTSModel.from_pretrained(
+    "Qwen/Qwen3-TTS",
+    device_map="mps",
+    torch_dtype=torch.float32,
+    attn_implementation="sdpa",
+)
+```
+
+### Why MLX?
+
+We chose MLX over MPS for several reasons:
+
+| Aspect | MPS | MLX |
+|--------|-----|-----|
+| **Performance** | ~2-5x (typical GPU) | **45x** (Audio Decoder) |
+| **Architecture** | PyTorch → Metal overhead | Native Apple Silicon |
+| **Compatibility** | macOS 15.1+ required | macOS 13.0+ |
+| **Memory** | Standard GPU model | Unified Memory optimized |
+
+MLX is Apple's native ML framework, designed specifically for Apple Silicon's unified memory architecture.
+
+### The Solution
+
+This project bridges the gap by porting the performance-critical audio decoder to [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework.
+
+### Who This Helps
+
+| User | Need |
+|------|------|
+| **Mac Developers** | Local TTS without cloud dependency |
+| **Privacy-Conscious** | Keep voice data on-device |
+| **Hobbyists** | Add voices to characters/projects |
+| **Cost-Conscious** | Avoid API fees for TTS |
+
+---
+
+## Benchmark
+
+### Overall Performance
+
+| Text Length | PyTorch CPU | MLX Hybrid | Speedup |
+|-------------|-------------|------------|---------|
+| 5 chars     | 16s         | ~3s        | ~5x     |
+| 28 chars    | 98s         | ~8s        | ~12x    |
+| 97 chars    | 462s        | 31s        | **14.8x** |
+
+### Component Breakdown
+
+| Component | PyTorch | MLX | Speedup |
+|-----------|---------|-----|---------|
+| Audio Decoder | 93.85s | 2.07s | **45.34x** |
+| Quantizer | 47.56s | 13.55s | **3.51x** |
+| Hybrid Pipeline | - | - | **14.8x** |
+
+> Environment: M3 MacBook Air 8GB Unified Memory
+
+---
+
 ## Requirements
 
 | Requirement | Version | Notes |
@@ -19,6 +101,8 @@ Achieves **14.8x speedup** through MLX hybrid pipeline.
 | **Disk** | ~2GB | Model weights + dependencies |
 
 > ❌ **Not supported**: Intel Mac, Windows, Linux (use original Qwen3-TTS with CUDA)
+
+---
 
 ## Quick Start
 
@@ -59,6 +143,8 @@ This creates `decoder_weights_mlx.npz` and `quantizer_weights_mlx.npz`.
 python src/hybrid_benchmark.py --text "こんにちは"
 ```
 
+---
+
 ## Installation Details
 
 ### Dependencies
@@ -98,91 +184,7 @@ pip install soundfile numpy
 | Out of memory | Close other apps; model needs ~2GB RAM |
 | `sox` warnings | Install SoX: `brew install sox` |
 
-## Why This Exists
-
-### The Problem
-
-[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) is an excellent open-source TTS model with voice cloning capabilities. However:
-
-- **CUDA-centric**: Designed for NVIDIA GPUs
-- **Unusable on Mac**: 98 seconds for 28 characters on CPU
-- **MPS limitations**: Conv1d >65536 channels caused incorrect results (fixed in macOS 15.1+)
-
-### MPS Update (macOS 15.1+)
-
-As of [PyTorch #129207](https://github.com/pytorch/pytorch/issues/129207), the MPS conv1d issue has been fixed:
-
-- **macOS 15.1+**: MPS kernel fix by Apple
-- **PyTorch 2.6.0+**: Conv1d >65536ch support restored
-
-If you're on macOS 15.1+, the simple MPS approach may work:
-
-```python
-model = Qwen3TTSModel.from_pretrained(
-    "Qwen/Qwen3-TTS",
-    device_map="mps",
-    torch_dtype=torch.float32,
-    attn_implementation="sdpa",
-)
-```
-
-### Why MLX?
-
-We chose MLX over MPS for several reasons:
-
-| Aspect | MPS | MLX |
-|--------|-----|-----|
-| **Performance** | ~2-5x (typical GPU) | **45x** (Audio Decoder) |
-| **Architecture** | PyTorch → Metal overhead | Native Apple Silicon |
-| **Compatibility** | macOS 15.1+ required | macOS 13.0+ |
-| **Memory** | Standard GPU model | Unified Memory optimized |
-
-MLX is Apple's native ML framework, designed specifically for Apple Silicon's unified memory architecture.
-
-### The Solution
-
-This project bridges the gap by porting the performance-critical audio decoder to [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework:
-
-| Before | After | Improvement |
-|--------|-------|-------------|
-| 98s / 28 chars | 8s / 28 chars | **12x faster** |
-| 462s / 97 chars | 31s / 97 chars | **14.8x faster** |
-
-### Who This Helps
-
-| User | Need |
-|------|------|
-| **Mac Developers** | Local TTS without cloud dependency |
-| **Privacy-Conscious** | Keep voice data on-device |
-| **Hobbyists** | Add voices to characters/projects |
-| **Cost-Conscious** | Avoid API fees for TTS |
-
-## Features
-
-- **No CUDA Required**: Runs on Apple Silicon (M1/M2/M3/M4) CPU
-- **MLX Acceleration**: Audio Decoder with **45x speedup**, Quantizer with **3.5x speedup**
-- **Hybrid Pipeline**: PyTorch + MLX for optimal performance
-- **Custom Voice**: Japanese female voice preset (ono_anna) with instruct support
-
-## Benchmark
-
-### Overall Performance
-
-| Text Length | PyTorch CPU | MLX Hybrid | Speedup |
-|-------------|-------------|------------|---------|
-| 5 chars     | 16s         | ~3s        | ~5x     |
-| 28 chars    | 98s         | ~8s        | ~12x    |
-| 97 chars    | 462s        | 31s        | **14.8x** |
-
-### Component Breakdown
-
-| Component | PyTorch | MLX | Speedup |
-|-----------|---------|-----|---------|
-| Audio Decoder | 93.85s | 2.07s | **45.34x** |
-| Quantizer | 47.56s | 13.55s | **3.51x** |
-| Hybrid Pipeline | - | - | **14.8x** |
-
-> Environment: M3 MacBook Air 8GB Unified Memory
+---
 
 ## Usage
 
@@ -211,32 +213,16 @@ python -m src.eris_voice "こんにちは" -o hello.wav
 python src/hybrid_benchmark.py --text "テスト"
 ```
 
-## Project Structure
+---
 
-```
-.
-├── LICENSE
-├── README.md
-├── requirements.txt
-├── setup.py
-├── decoder_weights_mlx.npz   # MLX decoder weights (generated)
-├── quantizer_weights_mlx.npz # MLX quantizer weights (generated)
-├── docs/
-│   ├── BENCHMARKS.md         # Detailed benchmark results
-│   ├── TODO.md               # Optimization roadmap
-│   └── OPTIMIZATION_SPEC.md  # Technical specifications
-├── src/
-│   ├── eris_voice.py         # Main module (PyTorch)
-│   ├── eris_voice_mlx.py     # MLX integration
-│   ├── mlx_decoder_v2.py     # MLX Audio Decoder (45x faster)
-│   ├── mlx_quantizer.py      # MLX Quantizer (3.5x faster)
-│   ├── hybrid_benchmark.py   # Hybrid pipeline benchmark
-│   └── weight_converter.py   # PyTorch → MLX conversion
-├── tests/
-│   ├── test_decoder.py       # Decoder unit tests
-│   └── test_quantizer.py     # Quantizer unit tests
-└── archive/                  # Experimental/old code
-```
+## Features
+
+- **No CUDA Required**: Runs on Apple Silicon (M1/M2/M3/M4) CPU
+- **MLX Acceleration**: Audio Decoder with **45x speedup**, Quantizer with **3.5x speedup**
+- **Hybrid Pipeline**: PyTorch + MLX for optimal performance
+- **Custom Voice**: Japanese female voice preset (ono_anna) with instruct support
+
+---
 
 ## Technical Details
 
@@ -273,6 +259,37 @@ PyTorch                          MLX
 | aiden | Sunny American male | English |
 | sohee | Warm female, rich emotion | Korean |
 
+---
+
+## Project Structure
+
+```
+.
+├── LICENSE
+├── README.md
+├── requirements.txt
+├── setup.py
+├── decoder_weights_mlx.npz   # MLX decoder weights (generated)
+├── quantizer_weights_mlx.npz # MLX quantizer weights (generated)
+├── docs/
+│   ├── BENCHMARKS.md         # Detailed benchmark results
+│   ├── TODO.md               # Optimization roadmap
+│   └── OPTIMIZATION_SPEC.md  # Technical specifications
+├── src/
+│   ├── eris_voice.py         # Main module (PyTorch)
+│   ├── eris_voice_mlx.py     # MLX integration
+│   ├── mlx_decoder_v2.py     # MLX Audio Decoder (45x faster)
+│   ├── mlx_quantizer.py      # MLX Quantizer (3.5x faster)
+│   ├── hybrid_benchmark.py   # Hybrid pipeline benchmark
+│   └── weight_converter.py   # PyTorch → MLX conversion
+├── tests/
+│   ├── test_decoder.py       # Decoder unit tests
+│   └── test_quantizer.py     # Quantizer unit tests
+└── archive/                  # Experimental/old code
+```
+
+---
+
 ## Roadmap
 
 Further optimization opportunities:
@@ -284,12 +301,26 @@ Further optimization opportunities:
 | **mlx-audio Integration** | Ecosystem contribution | 📋 Planned |
 | **Standalone CLI** | `pip install eris-voice` | 📋 Planned |
 
+---
+
 ## Limitations
 
 - **Apple Silicon Only**: MLX requires M1/M2/M3/M4 chips
-- **MPS Alternative**: Now works on macOS 15.1+ (see [MPS Update](#mps-update-macos-151))
+- **MPS Alternative**: Now works on macOS 15.1+ (see [MPS Alternative](#mps-alternative-macos-151))
 - **float16**: May cause numerical instability on CPU (use bfloat16)
 - **Pre-transformer**: Not yet ported to MLX (<0.5% of total time)
+
+---
+
+## Author's Note
+
+> This project taught me a lot. My macOS Sonoma couldn't use MPS for this, but I later discovered that the MPS kernel was fixed in macOS 15.1+, meaning this MLX approach might not be necessary for everyone.
+>
+> The real gains were: understanding PyTorch → Metal overhead, deep-diving into Qwen3-TTS internals, and learning MLX as Apple's native ML framework.
+>
+> — [@nao-amj](https://github.com/nao-amj)
+
+---
 
 ## Disclaimer
 
@@ -321,6 +352,8 @@ This software can generate synthetic speech. Users are responsible for:
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. See [LICENSE](LICENSE) for full terms.
 
+---
+
 ## Acknowledgments
 
 This project builds upon:
@@ -330,23 +363,10 @@ This project builds upon:
 
 The MLX weight files (`decoder_weights_mlx.npz`, `quantizer_weights_mlx.npz`) are derived from Qwen3-TTS pretrained models under the Apache 2.0 license.
 
-## Links
-
-- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
-- [MLX](https://github.com/ml-explore/mlx)
-
 ## Authors
 
 - **[@eris-ths](https://github.com/eris-ths)** - Development & MLX optimization
 - **[@nao-amj](https://github.com/nao-amj)** - Project direction & collaboration
-
-## Author's Note
-
-> This project taught me a lot. My macOS Sonoma couldn't use MPS for this, but I later discovered that the MPS kernel was fixed in macOS 15.1+, meaning this MLX approach might not be necessary for everyone.
->
-> The real gains were: understanding PyTorch → Metal overhead, deep-diving into Qwen3-TTS internals, and learning MLX as Apple's native ML framework.
->
-> — [@nao-amj](https://github.com/nao-amj)
 
 ## License
 

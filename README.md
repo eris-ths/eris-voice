@@ -106,7 +106,38 @@ pip install soundfile numpy
 
 - **CUDA-centric**: Designed for NVIDIA GPUs
 - **Unusable on Mac**: 98 seconds for 28 characters on CPU
-- **No Apple Silicon optimization**: MPS fails due to conv1d channel limits
+- **MPS limitations**: Conv1d >65536 channels caused incorrect results (fixed in macOS 15.1+)
+
+### MPS Update (macOS 15.1+)
+
+As of [PyTorch #129207](https://github.com/pytorch/pytorch/issues/129207), the MPS conv1d issue has been fixed:
+
+- **macOS 15.1+**: MPS kernel fix by Apple
+- **PyTorch 2.6.0+**: Conv1d >65536ch support restored
+
+If you're on macOS 15.1+, the simple MPS approach may work:
+
+```python
+model = Qwen3TTSModel.from_pretrained(
+    "Qwen/Qwen3-TTS",
+    device_map="mps",
+    torch_dtype=torch.float32,
+    attn_implementation="sdpa",
+)
+```
+
+### Why MLX?
+
+We chose MLX over MPS for several reasons:
+
+| Aspect | MPS | MLX |
+|--------|-----|-----|
+| **Performance** | ~2-5x (typical GPU) | **45x** (Audio Decoder) |
+| **Architecture** | PyTorch → Metal overhead | Native Apple Silicon |
+| **Compatibility** | macOS 15.1+ required | macOS 13.0+ |
+| **Memory** | Standard GPU model | Unified Memory optimized |
+
+MLX is Apple's native ML framework, designed specifically for Apple Silicon's unified memory architecture.
 
 ### The Solution
 
@@ -256,7 +287,7 @@ Further optimization opportunities:
 ## Limitations
 
 - **Apple Silicon Only**: MLX requires M1/M2/M3/M4 chips
-- **MPS (Apple GPU)**: Audio Decoder exceeds conv1d 65536ch limit
+- **MPS Alternative**: Now works on macOS 15.1+ (see [MPS Update](#mps-update-macos-151))
 - **float16**: May cause numerical instability on CPU (use bfloat16)
 - **Pre-transformer**: Not yet ported to MLX (<0.5% of total time)
 
@@ -308,6 +339,14 @@ The MLX weight files (`decoder_weights_mlx.npz`, `quantizer_weights_mlx.npz`) ar
 
 - **[@eris-ths](https://github.com/eris-ths)** - Development & MLX optimization
 - **[@nao-amj](https://github.com/nao-amj)** - Project direction & collaboration
+
+## Author's Note
+
+> This project taught me a lot. My macOS Sonoma couldn't use MPS for this, but I later discovered that the MPS kernel was fixed in macOS 15.1+, meaning this MLX approach might not be necessary for everyone.
+>
+> The real gains were: understanding PyTorch → Metal overhead, deep-diving into Qwen3-TTS internals, and learning MLX as Apple's native ML framework.
+>
+> — [@nao-amj](https://github.com/nao-amj)
 
 ## License
 

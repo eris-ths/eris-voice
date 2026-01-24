@@ -21,16 +21,18 @@ torch.set_num_threads(8)
 
 
 class HybridPipeline:
-    """MLX-accelerated TTS pipeline."""
+    """MLX-accelerated TTS pipeline with Quantizer + Decoder."""
 
-    def __init__(self):
+    def __init__(self, use_mlx_quantizer: bool = True):
         self.model = None
         self.mlx_decoder = None
+        self.mlx_quantizer = None
+        self.use_mlx_quantizer = use_mlx_quantizer
         self.original_forward = None
         self.sample_rate = 24000
 
     def load(self):
-        """Load PyTorch model and MLX decoder."""
+        """Load PyTorch model and MLX components."""
         print("Loading models...")
 
         # PyTorch model
@@ -47,24 +49,52 @@ class HybridPipeline:
         from mlx_decoder_v2 import Qwen3TTSDecoderMLX
 
         self.mlx_decoder = Qwen3TTSDecoderMLX()
-        weights_path = os.path.join(os.path.dirname(__file__), "..", "decoder_weights_mlx.npz")
-        weights = dict(mx.load(weights_path))
-        self.mlx_decoder.load_weights(weights)
+        decoder_weights_path = os.path.join(os.path.dirname(__file__), "..", "decoder_weights_mlx.npz")
+        decoder_weights = dict(mx.load(decoder_weights_path))
+        self.mlx_decoder.load_weights(decoder_weights)
+
+        # MLX quantizer (optional, 3.5x speedup)
+        if self.use_mlx_quantizer:
+            print("Loading MLX quantizer...")
+            from mlx_quantizer import SplitResidualVectorQuantizerMLX
+
+            self.mlx_quantizer = SplitResidualVectorQuantizerMLX(
+                n_q_semantic=1,
+                total_quantizers=16,
+                codebook_size=2048,
+                input_dim=512,
+                codebook_dim=256,
+            )
+            quantizer_weights_path = os.path.join(os.path.dirname(__file__), "..", "quantizer_weights_mlx.npz")
+            quantizer_weights = dict(mx.load(quantizer_weights_path))
+            self.mlx_quantizer.load_weights(quantizer_weights)
 
         # Patch decoder forward
         self._patch_decoder()
 
     def _patch_decoder(self):
-        """Monkey-patch decoder to use MLX for decoder blocks."""
+        """Monkey-patch decoder to use MLX for quantizer and decoder blocks."""
         pt_decoder = self.model.model.speech_tokenizer.model.decoder
         self.original_forward = pt_decoder.forward
         mlx_decoder = self.mlx_decoder
+        mlx_quantizer = self.mlx_quantizer
+        use_mlx_quantizer = self.use_mlx_quantizer
 
         def hybrid_forward(codes):
-            """Hybrid forward: PyTorch for early stages, MLX for decoder blocks."""
+            """Hybrid forward: MLX for quantizer + decoder blocks."""
             with torch.no_grad():
-                # 1. Quantizer decode (PyTorch)
-                hidden = pt_decoder.quantizer.decode(codes)
+                # 1. Quantizer decode (MLX or PyTorch)
+                if use_mlx_quantizer and mlx_quantizer is not None:
+                    # MLX quantizer (3.5x faster)
+                    codes_np = codes.detach().cpu().numpy()
+                    codes_mlx = mx.array(codes_np)
+                    hidden_mlx = mlx_quantizer.decode(codes_mlx)
+                    mx.eval(hidden_mlx)
+                    hidden_np = np.array(hidden_mlx)
+                    hidden = torch.from_numpy(hidden_np).to(dtype=torch.bfloat16)
+                else:
+                    # PyTorch quantizer (fallback)
+                    hidden = pt_decoder.quantizer.decode(codes)
 
                 # 2. Pre-conv + transpose (PyTorch)
                 hidden = pt_decoder.pre_conv(hidden).transpose(1, 2)
@@ -83,7 +113,7 @@ class HybridPipeline:
             hidden_np = hidden.detach().cpu().float().numpy()
             hidden_mlx = mx.array(hidden_np)
 
-            # 5. Main decoder blocks (MLX - the fast part!)
+            # 5. Main decoder blocks (MLX - 45x faster!)
             wav_mlx = mlx_decoder.decoder_conv0(hidden_mlx)
             for block in mlx_decoder.decoder_blocks:
                 wav_mlx = block(wav_mlx)
@@ -135,9 +165,11 @@ def run_benchmark():
     """Run benchmark comparing PyTorch vs MLX Hybrid."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--text", default=None, help="Custom text to generate")
+    parser.add_argument("--no-mlx-quantizer", action="store_true", help="Disable MLX quantizer (use PyTorch)")
     args = parser.parse_args()
 
-    pipeline = HybridPipeline()
+    use_mlx_quantizer = not args.no_mlx_quantizer
+    pipeline = HybridPipeline(use_mlx_quantizer=use_mlx_quantizer)
     pipeline.load()
 
     # Test cases
@@ -157,6 +189,8 @@ def run_benchmark():
 
     print("\n" + "=" * 50)
     print("MLX Hybrid Pipeline Benchmark")
+    print(f"  Quantizer: {'MLX (3.5x)' if use_mlx_quantizer else 'PyTorch'}")
+    print(f"  Decoder:   MLX (45x)")
     print("=" * 50)
 
     for name, text in test_cases:

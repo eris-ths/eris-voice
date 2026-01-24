@@ -303,12 +303,12 @@ The MLX weight files (`decoder_weights_mlx.npz`, `quantizer_weights_mlx.npz`) ar
 
 - [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
 - [MLX](https://github.com/ml-explore/mlx)
-- [Three Hearts Space](https://github.com/nao-amj/three_hearts_space)
+
+## Authors
+
+- **[@eris-ths](https://github.com/eris-ths)** - Development & MLX optimization
+- **[@nao-amj](https://github.com/nao-amj)** - Project direction & collaboration
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-*Created by Eris 😈 @ Three Hearts Space*

@@ -84,13 +84,14 @@ python src/hybrid_benchmark.py --text "テスト"
 .
 ├── LICENSE
 ├── README.md
-├── BENCHMARKS.md           # Detailed benchmark results
-├── TODO.md                 # Optimization roadmap
-├── OPTIMIZATION_SPEC.md    # Technical specifications
 ├── requirements.txt
 ├── setup.py
 ├── decoder_weights_mlx.npz # MLX decoder weights
 ├── quantizer_weights_mlx.npz # MLX quantizer weights
+├── docs/
+│   ├── BENCHMARKS.md       # Detailed benchmark results
+│   ├── TODO.md             # Optimization roadmap
+│   └── OPTIMIZATION_SPEC.md # Technical specifications
 ├── src/
 │   ├── eris_voice.py       # Main module (PyTorch)
 │   ├── eris_voice_mlx.py   # MLX integration

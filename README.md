@@ -220,6 +220,7 @@ python src/hybrid_benchmark.py --text "テスト"
 - **No CUDA Required**: Runs on Apple Silicon (M1/M2/M3/M4) CPU
 - **MLX Acceleration**: Audio Decoder with **45x speedup**, Quantizer with **3.5x speedup**
 - **Hybrid Pipeline**: PyTorch + MLX for optimal performance
+- **Streaming Output**: Sentence-level chunking for **2.7x faster** time-to-first-audio
 - **Custom Voice**: Japanese female voice preset (ono_anna) with instruct support
 
 ---
@@ -232,6 +233,7 @@ python src/hybrid_benchmark.py --text "テスト"
 |-----------|--------|---------|
 | Audio Decoder (conv1d) | ✅ Complete | 45x |
 | Quantizer (RVQ) | ✅ Complete | 3.5x |
+| Streaming (Sentence) | ✅ Complete | 2.7x TTFA |
 | Weight Converter | ✅ Complete | - |
 | Pre-Transformer | ⏸ Low Priority | (0.24s, <0.5%) |
 
@@ -292,13 +294,12 @@ PyTorch                          MLX
 
 ## Roadmap
 
-Further optimization opportunities:
-
 | Improvement | Expected Impact | Status |
 |-------------|-----------------|--------|
-| **Full MLX Native** | Remove PyTorch dependency, 2-3x faster | 🔬 Research |
-| **Streaming Output** | Lower time-to-first-audio | 📋 Planned |
-| **mlx-audio Integration** | Ecosystem contribution | 📋 Planned |
+| **Streaming Output** | 2.7x faster time-to-first-audio | ✅ Complete |
+| **Base Model (Voice Clone)** | Custom voice from reference audio | 🔥 Next |
+| **VoiceDesign Support** | Natural language voice description | 📋 Planned |
+| **Full MLX Native** | Remove PyTorch dependency | 🔬 Research |
 | **Standalone CLI** | `pip install eris-voice` | 📋 Planned |
 
 ---

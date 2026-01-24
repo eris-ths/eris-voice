@@ -48,23 +48,40 @@
 
 ---
 
-## Remaining (Low Priority)
+## Remaining
 
-### Pre-Transformer
+### Streaming Output ✅ (Sentence-Level)
 
-- [ ] Port to MLX
+- [x] **Sentence Chunking** - 2.3-2.7x faster Time-to-First-Audio
+  - Split text into sentences
+  - Process and output each sentence immediately
+  - Results: 28s → 10s TTFA for 4-sentence text
+
+- [ ] **Token-level Streaming** (Future)
+  - Hook into talker.generate() for true streaming
+  - Decode every N codes incrementally
+  - Requires qwen_tts internal modification
+
+### Base Model Integration 🔥 (Next Priority)
+
+- [ ] **Voice Clone Support**
+  - Port MLX optimizations to Base Model
+  - Create Eris voice from reference audio
+  - `create_voice_clone_prompt()` + `generate_voice_clone()`
+
+- [ ] **VoiceDesign Support**
+  - Natural language voice description
+  - "傲岸不遜で知的、低めで艶のある女性の声"
+
+### Low Priority
+
+- [ ] **Pre-Transformer → MLX**
   - Only 0.24s (<0.5% of total time)
   - Diminishing returns
-
-### Future Optimization
 
 - [ ] **mlx-audio Integration**
   - Waiting for Qwen3-TTS support
   - Expected: additional 2-3x speedup
-
-- [ ] **Streaming Output**
-  - Generate audio in chunks
-  - Lower latency for long text
 
 - [ ] **CoreML Conversion**
   - Apple Neural Engine

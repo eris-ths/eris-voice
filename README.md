@@ -7,6 +7,97 @@
 Qwen3-TTS optimized for Apple Silicon without CUDA.
 Achieves **14.8x speedup** through MLX hybrid pipeline.
 
+> ⚠️ **Experimental Software**: This is a research project. See [Disclaimer](#disclaimer) before use.
+
+## Requirements
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| **macOS** | 13.0+ | Apple Silicon required (M1/M2/M3/M4) |
+| **Python** | 3.10+ | 3.11 recommended |
+| **Memory** | 4GB+ | 8GB recommended |
+| **Disk** | ~2GB | Model weights + dependencies |
+
+> ❌ **Not supported**: Intel Mac, Windows, Linux (use original Qwen3-TTS with CUDA)
+
+## Quick Start
+
+### 1. Clone & Setup
+
+```bash
+git clone https://github.com/eris-ths/eris-voice.git
+cd eris-voice
+
+# Create virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+pip install -e .
+```
+
+### 2. Download Model (First Run)
+
+The first run will download Qwen3-TTS model (~1.2GB):
+
+```bash
+python -c "from src.eris_voice import ErisVoice; v = ErisVoice(); v.load()"
+```
+
+### 3. Convert Weights for MLX
+
+```bash
+python src/weight_converter.py
+```
+
+This creates `decoder_weights_mlx.npz` and `quantizer_weights_mlx.npz`.
+
+### 4. Test
+
+```bash
+python src/hybrid_benchmark.py --text "こんにちは"
+```
+
+## Installation Details
+
+### Dependencies
+
+```bash
+# Core (required)
+pip install qwen-tts torch soundfile mlx
+
+# Optional: Suppress audio warnings
+brew install sox
+```
+
+### Manual Installation
+
+If you prefer manual setup:
+
+```bash
+# 1. PyTorch (CPU version is fine)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# 2. MLX (Apple Silicon only)
+pip install mlx
+
+# 3. Qwen3-TTS
+pip install qwen-tts
+
+# 4. Audio handling
+pip install soundfile numpy
+```
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `mlx` install fails | Verify Apple Silicon: `uname -m` should show `arm64` |
+| Model download slow | Check network; ~1.2GB download required |
+| Out of memory | Close other apps; model needs ~2GB RAM |
+| `sox` warnings | Install SoX: `brew install sox` |
+
 ## Why This Exists
 
 ### The Problem
@@ -62,19 +153,6 @@ This project bridges the gap by porting the performance-critical audio decoder t
 
 > Environment: M3 MacBook Air 8GB Unified Memory
 
-## Installation
-
-```bash
-# Dependencies
-pip install qwen-tts soundfile torch mlx
-
-# SoX (optional, suppresses warnings)
-brew install sox
-
-# This package
-pip install -e .
-```
-
 ## Usage
 
 ### Python API
@@ -99,10 +177,6 @@ python -m src.eris_voice "こんにちは" -o hello.wav
 ### MLX Hybrid Pipeline (Recommended)
 
 ```bash
-# 1. Convert weights (one-time setup)
-python src/weight_converter.py
-
-# 2. Run hybrid benchmark
 python src/hybrid_benchmark.py --text "テスト"
 ```
 
@@ -114,23 +188,23 @@ python src/hybrid_benchmark.py --text "テスト"
 ├── README.md
 ├── requirements.txt
 ├── setup.py
-├── decoder_weights_mlx.npz # MLX decoder weights
-├── quantizer_weights_mlx.npz # MLX quantizer weights
+├── decoder_weights_mlx.npz   # MLX decoder weights (generated)
+├── quantizer_weights_mlx.npz # MLX quantizer weights (generated)
 ├── docs/
-│   ├── BENCHMARKS.md       # Detailed benchmark results
-│   ├── TODO.md             # Optimization roadmap
-│   └── OPTIMIZATION_SPEC.md # Technical specifications
+│   ├── BENCHMARKS.md         # Detailed benchmark results
+│   ├── TODO.md               # Optimization roadmap
+│   └── OPTIMIZATION_SPEC.md  # Technical specifications
 ├── src/
-│   ├── eris_voice.py       # Main module (PyTorch)
-│   ├── eris_voice_mlx.py   # MLX integration
-│   ├── mlx_decoder_v2.py   # MLX Audio Decoder (45x faster)
-│   ├── mlx_quantizer.py    # MLX Quantizer (3.5x faster)
-│   ├── hybrid_benchmark.py # Hybrid pipeline benchmark
-│   └── weight_converter.py # PyTorch → MLX conversion
+│   ├── eris_voice.py         # Main module (PyTorch)
+│   ├── eris_voice_mlx.py     # MLX integration
+│   ├── mlx_decoder_v2.py     # MLX Audio Decoder (45x faster)
+│   ├── mlx_quantizer.py      # MLX Quantizer (3.5x faster)
+│   ├── hybrid_benchmark.py   # Hybrid pipeline benchmark
+│   └── weight_converter.py   # PyTorch → MLX conversion
 ├── tests/
-│   ├── test_decoder.py     # Decoder unit tests
-│   └── test_quantizer.py   # Quantizer unit tests
-└── archive/                # Experimental/old code
+│   ├── test_decoder.py       # Decoder unit tests
+│   └── test_quantizer.py     # Quantizer unit tests
+└── archive/                  # Experimental/old code
 ```
 
 ## Technical Details
@@ -181,9 +255,40 @@ Further optimization opportunities:
 
 ## Limitations
 
+- **Apple Silicon Only**: MLX requires M1/M2/M3/M4 chips
 - **MPS (Apple GPU)**: Audio Decoder exceeds conv1d 65536ch limit
 - **float16**: May cause numerical instability on CPU (use bfloat16)
 - **Pre-transformer**: Not yet ported to MLX (<0.5% of total time)
+
+## Disclaimer
+
+### Experimental Software
+
+This project is **experimental research software** provided "as is" without warranty of any kind. It is:
+
+- **Not production-ready**: May contain bugs, produce unexpected results, or fail
+- **Not officially supported**: Community project, not affiliated with Alibaba or Apple
+- **Subject to change**: APIs and behavior may change without notice
+
+### Voice Synthesis Ethics
+
+This software can generate synthetic speech. Users are responsible for:
+
+- **Consent**: Do not clone voices without the speaker's permission
+- **Disclosure**: Clearly label AI-generated audio as synthetic
+- **Legal compliance**: Follow local laws regarding synthetic media
+- **No misuse**: Do not use for fraud, impersonation, or harassment
+
+### Model Quality
+
+- Output quality depends on input text, speaker preset, and instruct parameters
+- Japanese language produces best results with `ono_anna` preset
+- Other languages may have varying quality
+- No guarantee of accuracy, naturalness, or fitness for any purpose
+
+### No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. See [LICENSE](LICENSE) for full terms.
 
 ## Acknowledgments
 

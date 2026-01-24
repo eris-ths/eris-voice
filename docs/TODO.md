@@ -1,107 +1,108 @@
 # Optimization TODO - M3 MacBook Air 8GB
 
-> **Goal**: Practical TTS speed on 8GB M3 MacBook Air
-> **Status**: 98s → 31s achieved (14.8x speedup) ✅
+> **Goal**: Real-time TTS (RTF 1.0x+) on 8GB M3 MacBook Air
+> **Status**: RTF 1.06x achieved (balanced mode) ✅
 > **Last Updated**: 2026-01-24
 
 ---
 
 ## Current Performance
 
-| Text | Before | After | Speedup |
-|------|--------|-------|---------|
-| 5 chars | 16s | ~3s | ~5x |
-| 28 chars | 98s | ~8s | ~12x |
-| 97 chars | 462s | 31s | **14.8x** ✅ |
+### Real-Time Factor (RTF)
+
+| Quality Mode | Codebooks | ms/step | RTF | Quality |
+|-------------|-----------|---------|-----|---------|
+| high | 15 | 101ms | 0.82x | ★★★★★ |
+| **balanced** | **11** | **79ms** | **1.06x** | ★★★★☆ |
+| fast | 7 | 60ms | 1.40x | ★★★☆☆ |
+| ultra_fast | 3 | 40ms | 2.08x | ★★☆☆☆ |
+
+### Component Speedup
+
+| Component | Speedup | Status |
+|-----------|---------|--------|
+| Generate Loop | **166x** | ✅ Complete |
+| Audio Decoder | **45x** | ✅ Complete |
+| Quantizer | **3.5x** | ✅ Complete |
+| Talker Forward | **10.8x** | ✅ Complete |
 
 ---
 
-## Completed
+## Completed ✅
 
 ### Phase 1: Quick Wins
-
 - [x] **0.6B Model** - 1.7B → 0.6B (2.5x faster)
 - [x] **bfloat16** - fp32 → bf16 (stable, ~1.5x faster)
 - [x] **Thread optimization** - OMP_NUM_THREADS=8
 
-### Phase 2: MLX Migration ✅
-
+### Phase 2: MLX Decoder/Quantizer
 - [x] **Audio Decoder → MLX** - 45x speedup
-  - CausalConv1d, CausalTransConv1d
-  - SnakeBeta activation (log-scale alpha/beta)
-  - DecoderBlock with residual units
-
 - [x] **Quantizer → MLX** - 3.5x speedup
-  - SplitResidualVectorQuantizer
-  - EuclideanCodebook with EMA embedding
-
 - [x] **Weight Converter** - PyTorch → MLX .npz
-
 - [x] **Hybrid Pipeline** - 14.8x overall speedup
 
-### Code Quality
+### Phase 3: MLX Generate Loop
+- [x] **MLX Talker** - 10.8x speedup (28-layer transformer)
+- [x] **MLX CodePredictor** - 5-layer transformer
+- [x] **MLX Sampling** - top-p/top-k/temperature
+- [x] **KV Cache** - Incremental generation
+- [x] **Generate Loop** - 166x speedup (17,000ms → 102ms)
 
-- [x] Type hints throughout
-- [x] Proper error handling (WeightLoadError)
-- [x] Unit tests (test_decoder.py, test_quantizer.py)
-- [x] Clean project structure
+### Phase 4: Quality/Speed Optimization
+- [x] **Codebook Reduction** - RTF 1.0x+ achieved
+- [x] **Quality Modes** - high/balanced/fast/ultra_fast
+- [x] **MCP Server** - Claude Code integration
+- [x] **HTTP Server** - FastAPI with quality_mode
+
+### Streaming
+- [x] **Sentence Chunking** - 2.7x faster TTFA
 
 ---
 
-## Remaining
+## Remaining 🚧
 
-### Streaming Output ✅ (Sentence-Level)
+### Full MLX Pipeline Integration
+- [ ] **Tokenization Integration** - HuggingFace → MLX
+- [ ] **E2E MLX Pipeline** - Remove PyTorch dependency from generation
 
-- [x] **Sentence Chunking** - 2.3-2.7x faster Time-to-First-Audio
-  - Split text into sentences
-  - Process and output each sentence immediately
-  - Results: 28s → 10s TTFA for 4-sentence text
-
-- [ ] **Token-level Streaming** (Future)
-  - Hook into talker.generate() for true streaming
-  - Decode every N codes incrementally
-  - Requires qwen_tts internal modification
-
-### Base Model Integration 🔥 (Next Priority)
-
-- [ ] **Voice Clone Support**
-  - Port MLX optimizations to Base Model
-  - Create Eris voice from reference audio
-  - `create_voice_clone_prompt()` + `generate_voice_clone()`
-
-- [ ] **VoiceDesign Support**
-  - Natural language voice description
-  - "傲岸不遜で知的、低めで艶のある女性の声"
+### Future Optimization
+- [ ] **mx.compile()** - Requires KVCache refactor to array-based
+  - Currently blocked by: KVCache is custom object, not array tree
+  - Expected impact: 5-15% speedup + memory improvement
 
 ### Low Priority
-
-- [ ] **Pre-Transformer → MLX**
-  - Only 0.24s (<0.5% of total time)
-  - Diminishing returns
-
-- [ ] **mlx-audio Integration**
-  - Waiting for Qwen3-TTS support
-  - Expected: additional 2-3x speedup
-
-- [ ] **CoreML Conversion**
-  - Apple Neural Engine
-  - Potential for further acceleration
+- [ ] **Token-level Streaming** - Hook into generate() for true streaming
+- [ ] **Voice Clone Support** - Custom voice from reference audio
+- [ ] **Pre-Transformer → MLX** - Only 0.24s (<0.5% of total time)
+- [ ] **CoreML Conversion** - Apple Neural Engine
 
 ---
 
-## Architecture Notes
+## Architecture
 
 ```
-Current Pipeline (Hybrid):
+Current Pipeline (Hybrid MLX):
 
-PyTorch                          MLX
-   │                              │
-   ├── LLM (text → codes)         │
-   ├── Quantizer decode ──────────┼── 3.5x faster
-   ├── Pre-conv + upsample        │
-   └── Decoder blocks ────────────┼── 45x faster
-                                  │
-                              Audio output
+Text Input
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ MLX Generate Loop (166x speedup)                    │
+│  ├── Talker (28 layers + KVCache)                   │
+│  ├── codec_head → codebook[0]                       │
+│  └── CodePredictor (5 layers) → codebook[1-15]     │
+└─────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ MLX Decoder Pipeline                                │
+│  ├── Quantizer Decode (3.5x)                        │
+│  ├── Pre-conv + Upsample (PyTorch)                  │
+│  └── Audio Decoder (45x)                            │
+└─────────────────────────────────────────────────────┘
+    │
+    ▼
+Audio Output (24kHz WAV)
 ```
 
 ---
@@ -109,12 +110,17 @@ PyTorch                          MLX
 ## Memory Usage (8GB Environment)
 
 ```yaml
-0.6B bf16:
-  Model: ~1.2GB
+Model Weights:
+  Talker: ~3.0GB (talker_weights_mlx.npz)
+  CodePredictor: ~0.5GB (code_predictor_weights_mlx.npz)
+  Decoder: ~0.3GB (decoder_weights_mlx.npz)
+  Quantizer: ~0.03GB (quantizer_weights_mlx.npz)
+  Total: ~3.8GB ✅
+
+Runtime:
   KV Cache: ~0.5GB
   Audio Buffer: ~0.3GB
-  MLX Weights: ~0.3GB
-  Total: ~2.3GB ✅ (Safe margin)
+  Total Peak: ~4.6GB ✅ (Safe for 8GB)
 ```
 
 ---

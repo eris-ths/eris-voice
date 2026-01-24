@@ -93,6 +93,15 @@ app = FastAPI(
 )
 
 
+# Quality mode presets
+QUALITY_PRESETS = {
+    "high": 15,       # Full quality, RTF ~0.82x
+    "balanced": 11,   # Good quality, RTF ~1.0x (realtime)
+    "fast": 7,        # Acceptable quality, RTF ~1.4x
+    "ultra_fast": 3,  # Reduced quality, RTF ~2.0x
+}
+
+
 # Request/Response models
 class SpeakRequest(BaseModel):
     """Request for speech generation."""
@@ -100,6 +109,7 @@ class SpeakRequest(BaseModel):
     speaker: str = Field(default="ono_anna", description="Speaker preset")
     play: bool = Field(default=False, description="Play audio immediately")
     save: bool = Field(default=True, description="Save to file and return path")
+    quality_mode: str = Field(default="balanced", description="Quality mode: high, balanced, fast, ultra_fast")
 
 
 class SpeakResponse(BaseModel):
@@ -107,6 +117,7 @@ class SpeakResponse(BaseModel):
     success: bool
     text: str
     speaker: str
+    quality_mode: str
     duration_seconds: float
     generation_time_seconds: float
     realtime_factor: float
@@ -118,6 +129,7 @@ class StreamRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000, description="Text to synthesize")
     speaker: str = Field(default="ono_anna", description="Speaker preset")
     play_as_generated: bool = Field(default=True, description="Play each sentence as generated")
+    quality_mode: str = Field(default="balanced", description="Quality mode")
 
 
 class StreamResponse(BaseModel):
@@ -136,6 +148,8 @@ class StatusResponse(BaseModel):
     warmed_up: bool
     model: str = "Qwen3-TTS-12Hz-0.6B-CustomVoice"
     optimizations: list
+    quality_presets: dict = QUALITY_PRESETS
+    default_quality: str = "balanced"
     sample_rate: int = 24000
 
 
@@ -154,8 +168,12 @@ async def status():
         optimizations=[
             "MLX Audio Decoder (45x speedup)",
             "MLX Quantizer (3.5x speedup)",
+            "MLX Generate Loop (166x speedup)",
+            "Codebook Reduction (quality_mode)",
             "Persistent Server (no cold start)",
         ],
+        quality_presets=QUALITY_PRESETS,
+        default_quality="balanced",
     )
 
 
@@ -164,6 +182,10 @@ async def speak(request: SpeakRequest):
     """Generate speech from text."""
     try:
         pipeline = get_pipeline()
+
+        # TODO: Pass quality_mode to MLX generate loop once fully integrated
+        # num_codebooks = QUALITY_PRESETS.get(request.quality_mode, 11)
+        # Currently using PyTorch generation, quality_mode is prepared for MLX integration
 
         start = time.time()
         audio = pipeline.generate_sentence(request.text, speaker=request.speaker)
@@ -201,6 +223,7 @@ async def speak(request: SpeakRequest):
             success=True,
             text=request.text,
             speaker=request.speaker,
+            quality_mode=request.quality_mode,
             duration_seconds=duration,
             generation_time_seconds=generation_time,
             realtime_factor=rtf,

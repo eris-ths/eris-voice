@@ -2,53 +2,63 @@
 """
 Eris Voice MCP Server
 
-MLX-accelerated Text-to-Speech for Claude Code integration.
-Provides tools for generating and playing speech using Qwen3-TTS with MLX optimization.
+MCP server that connects to the persistent HTTP server for low-latency TTS.
+The HTTP server keeps models loaded, eliminating cold-start overhead.
+
+Architecture:
+    Claude Code → MCP Server (this file) → HTTP Server (eris_voice_server.py)
+                                          ↓
+                                    Pre-loaded models
 
 Usage:
-    # Run as MCP server (stdio)
-    python eris_voice_mcp.py
+    # First, start the HTTP server in a separate terminal:
+    python eris_voice_server.py
 
-    # Test with MCP Inspector
-    npx @modelcontextprotocol/inspector python eris_voice_mcp.py
+    # Then use this MCP server normally
+    # (configured in ~/.claude.json)
 """
 
 import os
 import sys
 import json
 import subprocess
-import tempfile
 import time
-from typing import Optional, List
+from typing import Optional
 from enum import Enum
 from pathlib import Path
 
-# Add src directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-os.environ["OMP_NUM_THREADS"] = "8"
-
+import httpx
 from pydantic import BaseModel, Field, ConfigDict
 from mcp.server.fastmcp import FastMCP
 
 # Initialize MCP server
 mcp = FastMCP("eris_voice_mcp")
 
-# Global pipeline instance (lazy loaded)
-_pipeline = None
+# HTTP server configuration
+HTTP_SERVER_URL = os.environ.get("ERIS_VOICE_SERVER_URL", "http://localhost:8765")
+HTTP_TIMEOUT = 120.0  # seconds
 
 
-def get_pipeline():
-    """Lazy load the TTS pipeline."""
-    global _pipeline
-    if _pipeline is None:
-        import torch
-        torch.set_num_threads(8)
+async def check_server_status() -> bool:
+    """Check if HTTP server is running."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{HTTP_SERVER_URL}/status", timeout=5.0)
+            return response.status_code == 200
+    except:
+        return False
 
-        from streaming_prototype import StreamingTTSPipeline
-        _pipeline = StreamingTTSPipeline()
-        _pipeline.load()
-    return _pipeline
+
+async def ensure_server_running():
+    """Ensure HTTP server is running, provide instructions if not."""
+    if not await check_server_status():
+        return {
+            "error": "HTTP server not running",
+            "message": "Please start the Eris Voice server first:",
+            "command": "cd /Users/hirohashi/Develop/three_hearts_space/_nao/work/qwen3_tts_eris_voice/src && python eris_voice_server.py",
+            "hint": "Run this in a separate terminal window",
+        }
+    return None
 
 
 # Enums
@@ -64,9 +74,17 @@ class Speaker(str, Enum):
 
 class OutputMode(str, Enum):
     """Output mode for generated audio."""
-    PLAY = "play"  # Play immediately
-    FILE = "file"  # Return file path only
-    BOTH = "both"  # Play and return file path
+    PLAY = "play"
+    FILE = "file"
+    BOTH = "both"
+
+
+class QualityMode(str, Enum):
+    """Quality mode for generation speed/quality tradeoff."""
+    HIGH = "high"           # 15 codebooks, RTF ~0.82x, best quality
+    BALANCED = "balanced"   # 11 codebooks, RTF ~1.0x, good quality (default)
+    FAST = "fast"           # 7 codebooks, RTF ~1.4x, acceptable quality
+    ULTRA_FAST = "ultra_fast"  # 3 codebooks, RTF ~2.0x, reduced quality
 
 
 # Input Models
@@ -96,6 +114,10 @@ class SpeakInput(BaseModel):
         default=None,
         description="Directory to save audio file. Uses temp directory if not specified.",
     )
+    quality_mode: QualityMode = Field(
+        default=QualityMode.BALANCED,
+        description="Quality mode: 'high' (best quality, slower), 'balanced' (default, realtime), 'fast' (faster), 'ultra_fast' (fastest)",
+    )
 
 
 class StreamingSpeakInput(BaseModel):
@@ -119,6 +141,10 @@ class StreamingSpeakInput(BaseModel):
     play_as_generated: bool = Field(
         default=True,
         description="Play each sentence as it's generated (streaming mode)",
+    )
+    quality_mode: QualityMode = Field(
+        default=QualityMode.BALANCED,
+        description="Quality mode for generation",
     )
 
 
@@ -164,77 +190,51 @@ async def eris_speak(params: SpeakInput) -> str:
         - Generate and play: eris_speak(text="こんにちは")
         - Save to file: eris_speak(text="Hello", output_mode="file")
         - Japanese voice: eris_speak(text="私はエリスよ", speaker="ono_anna")
+        - Fast mode: eris_speak(text="速い", quality_mode="fast")
     """
-    import numpy as np
-    import soundfile as sf
+    # Check server status
+    error = await ensure_server_running()
+    if error:
+        return json.dumps(error, ensure_ascii=False)
 
     try:
-        pipeline = get_pipeline()
-
-        start_time = time.time()
-        audio = pipeline.generate_sentence(params.text, speaker=params.speaker.value)
-        generation_time = time.time() - start_time
-
-        duration = len(audio) / pipeline.sample_rate
-        realtime_factor = duration / generation_time if generation_time > 0 else 0
-
-        # Determine output path
-        audio_path = None
-        if params.output_mode in (OutputMode.FILE, OutputMode.BOTH):
-            if params.output_dir:
-                output_dir = Path(params.output_dir)
-                output_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                output_dir = Path(tempfile.gettempdir())
-
-            timestamp = int(time.time() * 1000)
-            audio_path = str(output_dir / f"eris_voice_{timestamp}.wav")
-            sf.write(audio_path, audio, pipeline.sample_rate)
-
-        # Play audio
-        if params.output_mode in (OutputMode.PLAY, OutputMode.BOTH):
-            if audio_path:
-                subprocess.Popen(
-                    ["afplay", audio_path],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            else:
-                # Create temp file for playback
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    sf.write(f.name, audio, pipeline.sample_rate)
-                    subprocess.Popen(
-                        ["afplay", f.name],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-
-        response = {
-            "success": True,
+        # Prepare request
+        request_data = {
             "text": params.text,
             "speaker": params.speaker.value,
-            "duration_seconds": round(duration, 2),
-            "generation_time_seconds": round(generation_time, 2),
-            "realtime_factor": round(realtime_factor, 2),
+            "play": params.output_mode in (OutputMode.PLAY, OutputMode.BOTH),
+            "save": params.output_mode in (OutputMode.FILE, OutputMode.BOTH),
+            "quality_mode": params.quality_mode.value,
         }
 
-        if audio_path:
-            response["audio_path"] = audio_path
+        # Call HTTP server
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{HTTP_SERVER_URL}/speak",
+                json=request_data,
+                timeout=HTTP_TIMEOUT,
+            )
+            result = response.json()
 
-        return json.dumps(response, indent=2, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
 
+    except httpx.TimeoutException:
+        return json.dumps({
+            "success": False,
+            "error": "Request timed out",
+            "hint": "The text may be too long, try shorter input",
+        }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({
             "success": False,
             "error": str(e),
-            "text": params.text,
-        }, indent=2, ensure_ascii=False)
+        }, ensure_ascii=False)
 
 
 @mcp.tool(
     name="eris_speak_streaming",
     annotations={
-        "title": "Eris TTS Streaming Speak",
+        "title": "Eris TTS Streaming",
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
@@ -273,64 +273,40 @@ async def eris_speak_streaming(params: StreamingSpeakInput) -> str:
         - Streaming: eris_speak_streaming(text="こんにちは。私はエリスよ。よろしくね。")
         - No streaming: eris_speak_streaming(text="Hello.", play_as_generated=False)
     """
-    import numpy as np
-    import soundfile as sf
+    # Check server status
+    error = await ensure_server_running()
+    if error:
+        return json.dumps(error, ensure_ascii=False)
 
     try:
-        pipeline = get_pipeline()
-
-        sentences_info = []
-        all_audio = []
-        first_audio_time = None
-
-        for audio, sentence, elapsed in pipeline.generate_streaming(
-            params.text,
-            speaker=params.speaker.value,
-            play_immediately=params.play_as_generated,
-        ):
-            if first_audio_time is None:
-                first_audio_time = elapsed
-
-            duration = len(audio) / pipeline.sample_rate
-            all_audio.append(audio)
-
-            sentences_info.append({
-                "text": sentence,
-                "duration_seconds": round(duration, 2),
-                "elapsed_seconds": round(elapsed, 2),
-            })
-
-        # Combine and save
-        combined_audio = np.concatenate(all_audio)
-        total_duration = len(combined_audio) / pipeline.sample_rate
-
-        timestamp = int(time.time() * 1000)
-        audio_path = str(Path(tempfile.gettempdir()) / f"eris_streaming_{timestamp}.wav")
-        sf.write(audio_path, combined_audio, pipeline.sample_rate)
-
-        response = {
-            "success": True,
-            "sentences": sentences_info,
-            "total_duration_seconds": round(total_duration, 2),
-            "time_to_first_audio_seconds": round(first_audio_time, 2) if first_audio_time else None,
-            "total_generation_time_seconds": round(sentences_info[-1]["elapsed_seconds"], 2) if sentences_info else 0,
-            "audio_path": audio_path,
+        request_data = {
+            "text": params.text,
+            "speaker": params.speaker.value,
+            "play_as_generated": params.play_as_generated,
+            "quality_mode": params.quality_mode.value,
         }
 
-        return json.dumps(response, indent=2, ensure_ascii=False)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{HTTP_SERVER_URL}/stream",
+                json=request_data,
+                timeout=HTTP_TIMEOUT,
+            )
+            result = response.json()
+
+        return json.dumps(result, ensure_ascii=False)
 
     except Exception as e:
         return json.dumps({
             "success": False,
             "error": str(e),
-            "text": params.text,
-        }, indent=2, ensure_ascii=False)
+        }, ensure_ascii=False)
 
 
 @mcp.tool(
     name="eris_list_speakers",
     annotations={
-        "title": "List Available Speakers",
+        "title": "List Eris Voice Speakers",
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
@@ -361,47 +337,40 @@ async def eris_list_speakers() -> str:
             "id": "ono_anna",
             "name": "Ono Anna",
             "language": "Japanese",
-            "description": "Playful Japanese female voice (recommended for Japanese text)",
-            "recommended": True,
+            "description": "Playful Japanese female voice",
         },
         {
             "id": "vivian",
             "name": "Vivian",
             "language": "Chinese",
             "description": "Bright, edgy young female voice",
-            "recommended": False,
         },
         {
             "id": "serena",
             "name": "Serena",
             "language": "Chinese",
             "description": "Warm, gentle young female voice",
-            "recommended": False,
         },
         {
             "id": "ryan",
             "name": "Ryan",
             "language": "English",
             "description": "Dynamic male voice",
-            "recommended": False,
         },
         {
             "id": "aiden",
             "name": "Aiden",
             "language": "English",
             "description": "Sunny American male voice",
-            "recommended": False,
         },
         {
             "id": "sohee",
             "name": "Sohee",
             "language": "Korean",
             "description": "Warm female voice with rich emotion",
-            "recommended": False,
         },
     ]
-
-    return json.dumps(speakers, indent=2, ensure_ascii=False)
+    return json.dumps(speakers, ensure_ascii=False)
 
 
 @mcp.tool(
@@ -430,28 +399,48 @@ async def eris_status() -> str:
             "sample_rate": 24000
         }
     """
-    global _pipeline
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{HTTP_SERVER_URL}/status", timeout=5.0)
+            if response.status_code == 200:
+                result = response.json()
+                result["server_running"] = True
+                return json.dumps(result, ensure_ascii=False)
+    except:
+        pass
 
-    status = {
-        "loaded": _pipeline is not None,
+    return json.dumps({
+        "server_running": False,
+        "loaded": False,
         "model": "Qwen3-TTS-12Hz-0.6B-CustomVoice",
         "optimizations": [
             "MLX Audio Decoder (45x speedup)",
             "MLX Quantizer (3.5x speedup)",
+            "MLX Generate Loop (166x speedup)",
+            "Codebook Reduction (quality_mode)",
             "Sentence-level Streaming (2.7x faster TTFA)",
         ],
+        "quality_presets": {
+            "high": "15 codebooks, RTF ~0.82x, best quality",
+            "balanced": "11 codebooks, RTF ~1.0x (default)",
+            "fast": "7 codebooks, RTF ~1.4x",
+            "ultra_fast": "3 codebooks, RTF ~2.0x",
+        },
         "sample_rate": 24000,
-        "supported_languages": ["Japanese", "Chinese", "English", "Korean"],
-    }
-
-    if _pipeline is not None:
-        status["ready"] = True
-    else:
-        status["ready"] = False
-        status["note"] = "Model will be loaded on first use"
-
-    return json.dumps(status, indent=2, ensure_ascii=False)
+        "ready": False,
+        "note": "Start the HTTP server first: python eris_voice_server.py",
+    }, ensure_ascii=False)
 
 
 if __name__ == "__main__":
+    print("=" * 50)
+    print("Eris Voice MCP Server")
+    print("=" * 50)
+    print()
+    print("This MCP server connects to a persistent HTTP server.")
+    print("Make sure to start the HTTP server first:")
+    print()
+    print("  python eris_voice_server.py")
+    print()
+    print("Starting MCP server...")
     mcp.run()

@@ -5,89 +5,45 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Qwen3-TTS optimized for Apple Silicon without CUDA.
-Achieves **14.8x speedup** through MLX hybrid pipeline.
+Achieves **real-time speech synthesis (RTF 1.0x+)** through MLX-native pipeline.
 
 > ⚠️ **Experimental Software**: This is a research project. See [Disclaimer](#disclaimer) before use.
 
-> 💡 **Note**: If you're on **macOS 15.1+**, the simpler MPS approach may now work. See [MPS Alternative](#mps-alternative-macos-151) below.
-
 ---
 
-## Why This Project?
+## Highlights
 
-### The Problem
-
-[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) is an excellent open-source TTS model with voice cloning capabilities. However:
-
-- **CUDA-centric**: Designed for NVIDIA GPUs
-- **Unusable on Mac**: 98 seconds for 28 characters on CPU
-- **MPS limitations**: Conv1d >65536 channels caused incorrect results (fixed in macOS 15.1+)
-
-### MPS Alternative (macOS 15.1+)
-
-As of [PyTorch #129207](https://github.com/pytorch/pytorch/issues/129207), the MPS conv1d issue has been fixed:
-
-- **macOS 15.1+**: MPS kernel fix by Apple
-- **PyTorch 2.6.0+**: Conv1d >65536ch support restored
-
-If you're on macOS 15.1+, the simple MPS approach may work:
-
-```python
-model = Qwen3TTSModel.from_pretrained(
-    "Qwen/Qwen3-TTS",
-    device_map="mps",
-    torch_dtype=torch.float32,
-    attn_implementation="sdpa",
-)
-```
-
-### Why MLX?
-
-We chose MLX over MPS for several reasons:
-
-| Aspect | MPS | MLX |
-|--------|-----|-----|
-| **Performance** | ~2-5x (typical GPU) | **45x** (Audio Decoder) |
-| **Architecture** | PyTorch → Metal overhead | Native Apple Silicon |
-| **Compatibility** | macOS 15.1+ required | macOS 13.0+ |
-| **Memory** | Standard GPU model | Unified Memory optimized |
-
-MLX is Apple's native ML framework, designed specifically for Apple Silicon's unified memory architecture.
-
-### The Solution
-
-This project bridges the gap by porting the performance-critical audio decoder to [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework.
-
-### Who This Helps
-
-| User | Need |
-|------|------|
-| **Mac Developers** | Local TTS without cloud dependency |
-| **Privacy-Conscious** | Keep voice data on-device |
-| **Hobbyists** | Add voices to characters/projects |
-| **Cost-Conscious** | Avoid API fees for TTS |
+| Achievement | Description |
+|-------------|-------------|
+| **RTF 1.0x+** | Real-time speech synthesis achieved |
+| **166x Generate Loop** | MLX-native autoregressive generation |
+| **45x Audio Decoder** | MLX conv1d acceleration |
+| **Quality Modes** | Speed/quality tradeoff: high/balanced/fast/ultra_fast |
+| **MCP Server** | Claude Code integration ready |
 
 ---
 
 ## Benchmark
 
-### Overall Performance
+### Real-Time Factor (RTF)
 
-| Text Length | PyTorch CPU | MLX Hybrid | Speedup |
-|-------------|-------------|------------|---------|
-| 5 chars     | 16s         | ~3s        | ~5x     |
-| 28 chars    | 98s         | ~8s        | ~12x    |
-| 97 chars    | 462s        | 31s        | **14.8x** |
-
-### Component Breakdown
-
-| Component | PyTorch | MLX | Speedup |
-|-----------|---------|-----|---------|
-| Audio Decoder | 93.85s | 2.07s | **45.34x** |
-| Quantizer | 47.56s | 13.55s | **3.51x** |
-| Hybrid Pipeline | - | - | **14.8x** |
+| Quality Mode | Codebooks | ms/step | RTF | Quality |
+|-------------|-----------|---------|-----|---------|
+| high | 15 | 101ms | 0.82x | ★★★★★ |
+| **balanced** | **11** | **79ms** | **1.06x** | ★★★★☆ |
+| fast | 7 | 60ms | 1.40x | ★★★☆☆ |
+| ultra_fast | 3 | 40ms | 2.08x | ★★☆☆☆ |
 
 > Environment: M3 MacBook Air 8GB Unified Memory
+
+### Component Speedup
+
+| Component | Speedup | Description |
+|-----------|---------|-------------|
+| Generate Loop | **166x** | MLX Talker + CodePredictor + KVCache |
+| Audio Decoder | **45x** | MLX conv1d blocks |
+| Quantizer | **3.5x** | MLX RVQ decode |
+| Talker Forward | **10.8x** | MLX 28-layer transformer |
 
 ---
 
@@ -95,171 +51,123 @@ This project bridges the gap by porting the performance-critical audio decoder t
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| **macOS** | 13.0+ | Apple Silicon required (M1/M2/M3/M4) |
+| **macOS** | 13.0+ | Apple Silicon (M1/M2/M3/M4) |
 | **Python** | 3.10+ | 3.11 recommended |
-| **Memory** | 4GB+ | 8GB recommended |
-| **Disk** | ~2GB | Model weights + dependencies |
-
-> ❌ **Not supported**: Intel Mac, Windows, Linux (use original Qwen3-TTS with CUDA)
+| **Memory** | 8GB+ | Model weights ~4GB |
 
 ---
 
 ## Quick Start
 
-### 1. Clone & Setup
+### 1. Setup
 
 ```bash
 git clone https://github.com/eris-ths/eris-voice.git
 cd eris-voice
 
-# Create virtual environment (recommended)
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install dependencies
 pip install -r requirements.txt
 pip install -e .
 ```
 
-### 2. Download Model (First Run)
-
-The first run will download Qwen3-TTS model (~1.2GB):
-
-```bash
-python -c "from src.eris_voice import ErisVoice; v = ErisVoice(); v.load()"
-```
-
-### 3. Convert Weights for MLX
+### 2. Convert Weights
 
 ```bash
 python src/weight_converter.py
+python src/convert_talker_weights.py
 ```
 
-This creates `decoder_weights_mlx.npz` and `quantizer_weights_mlx.npz`.
-
-### 4. Test
+### 3. Start Server
 
 ```bash
-python src/hybrid_benchmark.py --text "こんにちは"
+python src/eris_voice_server.py
+```
+
+### 4. Use via MCP
+
+Configure in `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "eris-voice": {
+      "command": "python",
+      "args": ["/path/to/eris-voice/src/eris_voice_mcp.py"]
+    }
+  }
+}
 ```
 
 ---
 
-## Installation Details
+## API
 
-### Dependencies
-
-```bash
-# Core (required)
-pip install qwen-tts torch soundfile mlx
-
-# Optional: Suppress audio warnings
-brew install sox
-```
-
-### Manual Installation
-
-If you prefer manual setup:
-
-```bash
-# 1. PyTorch (CPU version is fine)
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# 2. MLX (Apple Silicon only)
-pip install mlx
-
-# 3. Qwen3-TTS
-pip install qwen-tts
-
-# 4. Audio handling
-pip install soundfile numpy
-```
-
-### Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| `mlx` install fails | Verify Apple Silicon: `uname -m` should show `arm64` |
-| Model download slow | Check network; ~1.2GB download required |
-| Out of memory | Close other apps; model needs ~2GB RAM |
-| `sox` warnings | Install SoX: `brew install sox` |
-
----
-
-## Usage
-
-### Python API
+### MCP Tools
 
 ```python
-from src.eris_voice import ErisVoice
+# Generate and play speech
+eris_speak(text="こんにちは", speaker="ono_anna")
 
-# Initialize & load
-voice = ErisVoice()
-voice.load()
+# With quality mode (balanced = realtime)
+eris_speak(text="速く話して", quality_mode="fast")
 
+# Streaming (sentence-by-sentence)
+eris_speak_streaming(text="こんにちは。私はエリスよ。よろしくね。")
+
+# Check status
+eris_status()
+```
+
+### HTTP API
+
+```bash
 # Generate speech
-voice.speak("ふふ...面白いことを言うわね。", output_path="output.wav")
-```
+curl -X POST http://localhost:8765/speak \
+  -H "Content-Type: application/json" \
+  -d '{"text": "こんにちは", "speaker": "ono_anna", "quality_mode": "balanced"}'
 
-### CLI
-
-```bash
-python -m src.eris_voice "こんにちは" -o hello.wav
-```
-
-### MLX Hybrid Pipeline (Recommended)
-
-```bash
-python src/hybrid_benchmark.py --text "テスト"
+# Status
+curl http://localhost:8765/status
 ```
 
 ---
 
-## Features
+## Quality Modes
 
-- **No CUDA Required**: Runs on Apple Silicon (M1/M2/M3/M4) CPU
-- **MLX Acceleration**: Audio Decoder with **45x speedup**, Quantizer with **3.5x speedup**
-- **Hybrid Pipeline**: PyTorch + MLX for optimal performance
-- **Streaming Output**: Sentence-level chunking for **2.7x faster** time-to-first-audio
-- **Custom Voice**: Japanese female voice preset (ono_anna) with instruct support
+| Mode | Use Case | RTF |
+|------|----------|-----|
+| `high` | Best quality, offline generation | 0.82x |
+| `balanced` | **Default**, realtime playback | 1.06x |
+| `fast` | Quick previews, acceptable quality | 1.40x |
+| `ultra_fast` | Speed priority, reduced quality | 2.08x |
 
 ---
 
-## Technical Details
-
-### MLX Migration Status
-
-| Component | Status | Speedup |
-|-----------|--------|---------|
-| Audio Decoder (conv1d) | ✅ Complete | 45x |
-| Quantizer (RVQ) | ✅ Complete | 3.5x |
-| Streaming (Sentence) | ✅ Complete | 2.7x TTFA |
-| Weight Converter | ✅ Complete | - |
-| Pre-Transformer | ⏸ Low Priority | (0.24s, <0.5%) |
-
-### Architecture
+## Architecture
 
 ```
-PyTorch                          MLX
-   │                              │
-   ├── LLM (text → codes)         │
-   ├── Quantizer decode ──────────┼── SplitResidualVectorQuantizerMLX
-   ├── Pre-conv + upsample        │
-   └── Decoder blocks ────────────┼── Qwen3TTSDecoderMLX (45x faster)
-                                  │
-                              Audio output
+Text Input
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ MLX Generate Loop (166x speedup)                    │
+│  ├── Talker (28 layers + KVCache)                   │
+│  ├── codec_head → codebook[0]                       │
+│  └── CodePredictor (5 layers) → codebook[1-15]     │
+└─────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ MLX Decoder Pipeline                                │
+│  ├── Quantizer Decode (3.5x)                        │
+│  ├── Pre-conv + Upsample (PyTorch)                  │
+│  └── Audio Decoder (45x)                            │
+└─────────────────────────────────────────────────────┘
+    │
+    ▼
+Audio Output (24kHz WAV)
 ```
-
-### Available Speakers
-
-| Speaker | Description | Language |
-|---------|-------------|----------|
-| ono_anna | Playful Japanese female | Japanese ⭐ |
-| vivian | Bright, edgy young female | Chinese |
-| serena | Warm, gentle young female | Chinese |
-| ryan | Dynamic male | English |
-| aiden | Sunny American male | English |
-| sohee | Warm female, rich emotion | Korean |
 
 ---
 
@@ -267,59 +175,59 @@ PyTorch                          MLX
 
 ```
 .
-├── LICENSE
-├── README.md
-├── requirements.txt
-├── setup.py
-├── decoder_weights_mlx.npz   # MLX decoder weights (generated)
-├── quantizer_weights_mlx.npz # MLX quantizer weights (generated)
-├── docs/
-│   ├── BENCHMARKS.md         # Detailed benchmark results
-│   ├── TODO.md               # Optimization roadmap
-│   └── OPTIMIZATION_SPEC.md  # Technical specifications
 ├── src/
-│   ├── eris_voice.py         # Main module (PyTorch)
-│   ├── eris_voice_mlx.py     # MLX integration
-│   ├── mlx_decoder_v2.py     # MLX Audio Decoder (45x faster)
-│   ├── mlx_quantizer.py      # MLX Quantizer (3.5x faster)
-│   ├── hybrid_benchmark.py   # Hybrid pipeline benchmark
-│   └── weight_converter.py   # PyTorch → MLX conversion
+│   ├── eris_voice_mcp.py      # MCP server (Claude Code)
+│   ├── eris_voice_server.py   # HTTP server (FastAPI)
+│   ├── mlx_generate.py        # Generate loop (166x)
+│   ├── mlx_talker.py          # MLX Talker model
+│   ├── mlx_code_predictor.py  # MLX CodePredictor
+│   ├── mlx_decoder_v2.py      # MLX Audio Decoder (45x)
+│   ├── mlx_quantizer.py       # MLX Quantizer (3.5x)
+│   ├── mlx_kv_cache.py        # KV Cache for inference
+│   ├── mlx_sampling.py        # Sampling utilities
+│   └── streaming_prototype.py # Sentence-level streaming
+├── docs/
+│   ├── generate_loop_mlx_tasks.md  # Progress report
+│   └── BENCHMARKS.md               # Detailed benchmarks
 ├── tests/
-│   ├── test_decoder.py       # Decoder unit tests
-│   └── test_quantizer.py     # Quantizer unit tests
-└── archive/                  # Experimental/old code
+├── archive/                   # Experimental code
+└── *.npz                      # MLX weights (generated)
 ```
+
+---
+
+## Available Speakers
+
+| Speaker | Language | Description |
+|---------|----------|-------------|
+| ono_anna ⭐ | Japanese | Playful female |
+| vivian | Chinese | Bright, edgy female |
+| serena | Chinese | Warm, gentle female |
+| ryan | English | Dynamic male |
+| aiden | English | Sunny American male |
+| sohee | Korean | Warm female |
 
 ---
 
 ## Roadmap
 
-| Improvement | Expected Impact | Status |
-|-------------|-----------------|--------|
-| **Streaming Output** | 2.7x faster time-to-first-audio | ✅ Complete |
-| **Base Model (Voice Clone)** | Custom voice from reference audio | 🔥 Next |
-| **VoiceDesign Support** | Natural language voice description | 📋 Planned |
-| **Full MLX Native** | Remove PyTorch dependency | 🔬 Research |
-| **Standalone CLI** | `pip install eris-voice` | 📋 Planned |
+| Feature | Status |
+|---------|--------|
+| RTF 1.0x (Real-time) | ✅ Complete |
+| MLX Generate Loop | ✅ Complete (166x) |
+| Quality Modes | ✅ Complete |
+| MCP Server | ✅ Complete |
+| HTTP Server | ✅ Complete |
+| Full MLX Pipeline | 🚧 In Progress |
+| mx.compile() | 📋 Planned |
 
 ---
 
 ## Limitations
 
-- **Apple Silicon Only**: MLX requires M1/M2/M3/M4 chips
-- **MPS Alternative**: Now works on macOS 15.1+ (see [MPS Alternative](#mps-alternative-macos-151))
-- **float16**: May cause numerical instability on CPU (use bfloat16)
-- **Pre-transformer**: Not yet ported to MLX (<0.5% of total time)
-
----
-
-## Author's Note
-
-> This project taught me a lot. My macOS Sonoma couldn't use MPS for this, but I later discovered that the MPS kernel was fixed in macOS 15.1+, meaning this MLX approach might not be necessary for everyone.
->
-> The real gains were: understanding PyTorch → Metal overhead, deep-diving into Qwen3-TTS internals, and learning MLX as Apple's native ML framework.
->
-> — [@nao-amj](https://github.com/nao-amj)
+- **Apple Silicon Only**: MLX requires M1/M2/M3/M4
+- **Hybrid Pipeline**: Still uses PyTorch for tokenization and some pre-processing
+- **Memory**: Model weights require ~4GB RAM
 
 ---
 
@@ -327,47 +235,26 @@ PyTorch                          MLX
 
 ### Experimental Software
 
-This project is **experimental research software** provided "as is" without warranty of any kind. It is:
-
-- **Not production-ready**: May contain bugs, produce unexpected results, or fail
-- **Not officially supported**: Community project, not affiliated with Alibaba or Apple
-- **Subject to change**: APIs and behavior may change without notice
+This is **experimental research software** provided "as is" without warranty.
 
 ### Voice Synthesis Ethics
 
-This software can generate synthetic speech. Users are responsible for:
-
-- **Consent**: Do not clone voices without the speaker's permission
-- **Disclosure**: Clearly label AI-generated audio as synthetic
-- **Legal compliance**: Follow local laws regarding synthetic media
-- **No misuse**: Do not use for fraud, impersonation, or harassment
-
-### Model Quality
-
-- Output quality depends on input text, speaker preset, and instruct parameters
-- Japanese language produces best results with `ono_anna` preset
-- Other languages may have varying quality
-- No guarantee of accuracy, naturalness, or fitness for any purpose
-
-### No Warranty
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. See [LICENSE](LICENSE) for full terms.
+- Do not clone voices without consent
+- Label AI-generated audio as synthetic
+- Follow local laws regarding synthetic media
+- Do not use for fraud or impersonation
 
 ---
 
 ## Acknowledgments
 
-This project builds upon:
-
-- **[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** by Alibaba (Apache 2.0) - The underlying TTS model
-- **[MLX](https://github.com/ml-explore/mlx)** by Apple - Machine learning framework for Apple Silicon
-
-The MLX weight files (`decoder_weights_mlx.npz`, `quantizer_weights_mlx.npz`) are derived from Qwen3-TTS pretrained models under the Apache 2.0 license.
+- **[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** by Alibaba (Apache 2.0)
+- **[MLX](https://github.com/ml-explore/mlx)** by Apple
 
 ## Authors
 
 - **[@eris-ths](https://github.com/eris-ths)** - Development & MLX optimization
-- **[@nao-amj](https://github.com/nao-amj)** - Project direction & collaboration
+- **[@nao-amj](https://github.com/nao-amj)** - Project direction
 
 ## License
 

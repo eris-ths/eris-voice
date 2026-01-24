@@ -1,59 +1,64 @@
 # Eris Voice - Qwen3-TTS for Apple Silicon
 
-> エリスの声を Apple Silicon で生成する 😈
+> MLX-accelerated Text-to-Speech for Apple Silicon 😈
 
-Qwen3-TTS を CUDA なしで動作させる最適化実装。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 🎯 特徴
+Qwen3-TTS optimized for Apple Silicon without CUDA.
+Achieves **14.8x speedup** through MLX hybrid pipeline.
 
-- **CUDA 不要**: Apple Silicon (M1/M2/M3/M4) の CPU で動作
-- **MLX Decoder**: Audio Decoder を MLX で実装し **45倍高速化** 🔥
-- **Ono_Anna**: 日本人女性のプリセット声を使用
-- **instruct対応**: スタイル指示でエリスらしさを表現
+## Features
 
-## 📊 ベンチマーク
+- **No CUDA Required**: Runs on Apple Silicon (M1/M2/M3/M4) CPU
+- **MLX Acceleration**: Audio Decoder with **45x speedup**, Quantizer with **3.5x speedup**
+- **Hybrid Pipeline**: PyTorch + MLX for optimal performance
+- **Custom Voice**: Japanese female voice preset (ono_anna) with instruct support
 
-### PyTorch CPU (baseline)
+## Benchmark
 
-| 設定 | 生成時間 (5文字) | 生成時間 (28文字) |
-|------|-----------------|------------------|
-| 1.7B + fp32 | 367秒 | 推定30分+ |
-| **0.6B + bf16** | **16秒** | **98秒** |
+### Overall Performance
 
-### MLX Pipeline (新規) 🚀
+| Text Length | PyTorch CPU | MLX Hybrid | Speedup |
+|-------------|-------------|------------|---------|
+| 5 chars     | 16s         | ~3s        | ~5x     |
+| 28 chars    | 98s         | ~8s        | ~12x    |
+| 97 chars    | 462s        | 31s        | **14.8x** |
+
+### Component Breakdown
 
 | Component | PyTorch | MLX | Speedup |
 |-----------|---------|-----|---------|
-| Audio Decoder only | 93.85s | 2.07s | **45.34x** |
-| Quantizer + Decoder | 47.56s | 6.97s | **6.83x** |
+| Audio Decoder | 93.85s | 2.07s | **45.34x** |
+| Quantizer | 47.56s | 13.55s | **3.51x** |
+| Hybrid Pipeline | - | - | **14.8x** |
 
-> Note: pre_transformer (0.24s, <0.5%) は未移植。実用上の影響は軽微。
+> Environment: M3 MacBook Air 8GB Unified Memory
 
-## 🚀 インストール
+## Installation
 
 ```bash
-# 依存関係
+# Dependencies
 pip install qwen-tts soundfile torch mlx
 
-# SoX (オプション、警告回避用)
+# SoX (optional, suppresses warnings)
 brew install sox
 
-# このパッケージ
+# This package
 pip install -e .
 ```
 
-## 💻 使い方
+## Usage
 
 ### Python API
 
 ```python
 from src.eris_voice import ErisVoice
 
-# 初期化 & ロード
+# Initialize & load
 voice = ErisVoice()
 voice.load()
 
-# 音声生成
+# Generate speech
 voice.speak("ふふ...面白いことを言うわね。", output_path="output.wav")
 ```
 
@@ -63,47 +68,70 @@ voice.speak("ふふ...面白いことを言うわね。", output_path="output.wa
 python -m src.eris_voice "こんにちは" -o hello.wav
 ```
 
-### MLX Decoder (実験的)
+### MLX Hybrid Pipeline (Recommended)
 
 ```bash
-# 1. 重みを抽出
+# 1. Convert weights (one-time setup)
 python src/weight_converter.py
 
-# 2. ハイブリッド実行テスト
-python src/hybrid_execution.py
+# 2. Run hybrid benchmark
+python src/hybrid_benchmark.py --text "テスト"
 ```
 
-## ⚠️ 制限事項
-
-- **MPS (Apple GPU)**: Audio Decoder が conv1d > 65536ch 制限に引っかかる
-- **float16**: CPU で数値不安定になる場合あり（bfloat16 推奨）
-- **MLX統合**: quantizer + pre_transformer の移植が未完了
-
-## 🔧 技術詳細
-
-### プロファイル結果
+## Project Structure
 
 ```
-Total: 39.7秒 の内訳
-├── conv1d (Audio Decoder): 28.0秒 (71%) ← MLX で 45x 高速化 🔥
-├── LLM generate: 5.2秒 (13%)
-├── Linear layers: 3.6秒 (9%)
-└── その他: 2.9秒 (7%)
+.
+├── LICENSE
+├── README.md
+├── BENCHMARKS.md           # Detailed benchmark results
+├── TODO.md                 # Optimization roadmap
+├── OPTIMIZATION_SPEC.md    # Technical specifications
+├── requirements.txt
+├── setup.py
+├── decoder_weights_mlx.npz # MLX decoder weights
+├── quantizer_weights_mlx.npz # MLX quantizer weights
+├── src/
+│   ├── eris_voice.py       # Main module (PyTorch)
+│   ├── eris_voice_mlx.py   # MLX integration
+│   ├── mlx_decoder_v2.py   # MLX Audio Decoder (45x faster)
+│   ├── mlx_quantizer.py    # MLX Quantizer (3.5x faster)
+│   ├── hybrid_benchmark.py # Hybrid pipeline benchmark
+│   └── weight_converter.py # PyTorch → MLX conversion
+├── tests/
+│   ├── test_decoder.py     # Decoder unit tests
+│   └── test_quantizer.py   # Quantizer unit tests
+└── archive/                # Experimental/old code
 ```
 
-### MLX 移植状況
+## Technical Details
+
+### MLX Migration Status
 
 | Component | Status | Speedup |
 |-----------|--------|---------|
-| Audio Decoder (conv1d) | ✅ 完了 | 45x |
-| Quantizer | ✅ 完了 | 3.5x |
-| Weight Converter | ✅ 完了 | - |
-| Pre-Transformer | 📌 低優先度 | (0.24s, <0.5%) |
+| Audio Decoder (conv1d) | ✅ Complete | 45x |
+| Quantizer (RVQ) | ✅ Complete | 3.5x |
+| Weight Converter | ✅ Complete | - |
+| Pre-Transformer | ⏸ Low Priority | (0.24s, <0.5%) |
 
-### 利用可能なスピーカー
+### Architecture
 
-| Speaker | 説明 | 言語 |
-|---------|------|------|
+```
+PyTorch                          MLX
+   │                              │
+   ├── LLM (text → codes)         │
+   ├── Quantizer decode ──────────┼── SplitResidualVectorQuantizerMLX
+   ├── Pre-conv + upsample        │
+   └── Decoder blocks ────────────┼── Qwen3TTSDecoderMLX (45x faster)
+                                  │
+                              Audio output
+```
+
+### Available Speakers
+
+| Speaker | Description | Language |
+|---------|-------------|----------|
 | ono_anna | Playful Japanese female | Japanese ⭐ |
 | vivian | Bright, edgy young female | Chinese |
 | serena | Warm, gentle young female | Chinese |
@@ -111,32 +139,22 @@ Total: 39.7秒 の内訳
 | aiden | Sunny American male | English |
 | sohee | Warm female, rich emotion | Korean |
 
-## 📁 ファイル構成
+## Limitations
 
-```
-.
-├── README.md
-├── BENCHMARKS.md          # ベンチマーク結果
-├── TODO.md                # 高速化TODO
-├── OPTIMIZATION_SPEC.md   # 高速化仕様書
-├── requirements.txt
-├── setup.py
-└── src/
-    ├── eris_voice.py          # メインモジュール
-    ├── mlx_decoder_v2.py      # MLX Audio Decoder 🔥
-    ├── mlx_quantizer.py       # MLX Quantizer 🆕
-    ├── weight_converter.py    # PyTorch → MLX 変換
-    ├── hybrid_execution.py    # ハイブリッド実行テスト v1
-    ├── hybrid_execution_v2.py # ハイブリッド実行テスト v2 🆕
-    └── param_optimization_test.py  # パラメータ最適化
-```
+- **MPS (Apple GPU)**: Audio Decoder exceeds conv1d 65536ch limit
+- **float16**: May cause numerical instability on CPU (use bfloat16)
+- **Pre-transformer**: Not yet ported to MLX (<0.5% of total time)
 
-## 🔗 関連リンク
+## Links
 
 - [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
 - [MLX](https://github.com/ml-explore/mlx)
 - [Three Hearts Space](https://github.com/nao-amj/three_hearts_space)
 
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
 ---
 
-*Created by Eris 😈 - 2026-01-23*
+*Created by Eris 😈 @ Three Hearts Space*

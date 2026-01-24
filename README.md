@@ -29,21 +29,29 @@ Achieves **real-time speech synthesis (RTF 1.0x+)** through MLX-native pipeline.
 
 | Quality Mode | Codebooks | ms/step | RTF | Quality |
 |-------------|-----------|---------|-----|---------|
-| high | 15 | 101ms | 0.82x | ★★★★★ |
-| **balanced** | **11** | **79ms** | **1.06x** | ★★★★☆ |
-| fast | 7 | 60ms | 1.40x | ★★★☆☆ |
-| ultra_fast | 3 | 40ms | 2.08x | ★★☆☆☆ |
+| high | 15 | ~100ms | 0.83x | ★★★★★ |
+| **balanced** | **11** | **~80ms** | **0.93-0.97x** | ★★★★☆ |
+| fast | 7 | ~60ms | 1.4x | ★★★☆☆ |
+| ultra_fast | 3 | ~40ms | 2.0x | ★★☆☆☆ |
 
 > Environment: M3 MacBook Air 8GB Unified Memory
 
-### Component Speedup
+### Test Results (balanced mode)
 
-| Component | Speedup | Description |
-|-----------|---------|-------------|
-| Generate Loop | **166x** | MLX Talker + CodePredictor + KVCache |
-| Audio Decoder | **45x** | MLX conv1d blocks |
-| Quantizer | **3.5x** | MLX RVQ decode |
-| Talker Forward | **10.8x** | MLX 28-layer transformer |
+| Text | Audio Duration | Generation Time | RTF |
+|------|---------------|-----------------|-----|
+| こんにちは。 | 2.48s | 2.56s | **0.97x** |
+| 私はエリス... | 5.68s | 5.84s | **0.97x** |
+| 今日はとても... | 3.84s | 4.15s | **0.93x** |
+
+### Speedup vs PyTorch CPU
+
+| Metric | PyTorch (CPU) | MLX | Speedup |
+|--------|---------------|-----|---------|
+| RTF | 0.08x | 0.97x | **12x** |
+| Audio Decoder | baseline | 45x | **45x** |
+| Quantizer | baseline | 3.5x | **3.5x** |
+| Talker Forward | baseline | 10.8x | **10.8x** |
 
 ---
 
@@ -147,14 +155,26 @@ curl http://localhost:8765/status
 ## Architecture
 
 ```
-Text Input
+Text Input (PyTorch tokenization)
     │
     ▼
 ┌─────────────────────────────────────────────────────┐
-│ MLX Generate Loop (166x speedup)                    │
-│  ├── Talker (28 layers + KVCache)                   │
-│  ├── codec_head → codebook[0]                       │
-│  └── CodePredictor (5 layers) → codebook[1-15]     │
+│ MLX Generate Loop (12x speedup vs PyTorch CPU)      │
+│                                                     │
+│  Prefill:                                           │
+│    Talker(initial_embeds) → past_hidden, code_0    │
+│                                                     │
+│  Generate Loop:                                     │
+│    CodePredictor([past_hidden, embed(code_0)])     │
+│      → codebook[1-15]                               │
+│    Talker(sum_embeds + trailing)                    │
+│      → new_past_hidden, new_code_0                  │
+│                                                     │
+│  Features:                                          │
+│    ├── Talker: 28-layer Transformer + KVCache      │
+│    ├── CodePredictor: 5-layer Transformer + KVCache│
+│    ├── suppress_tokens: 2048-3071 (EOS=2150 OK)    │
+│    └── Quality modes: high/balanced/fast/ultra_fast │
 └─────────────────────────────────────────────────────┘
     │
     ▼

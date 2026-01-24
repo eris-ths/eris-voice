@@ -43,6 +43,17 @@ QUALITY_PRESETS = {
 }
 
 
+def get_default_suppress_tokens() -> List[int]:
+    """
+    Get default suppress tokens for Qwen3-TTS.
+
+    PyTorch suppresses tokens 2048-3071 EXCEPT 2150 (EOS).
+    This ensures the model can only generate EOS from the special token range.
+    """
+    # Suppress 2048-2149 (before EOS) and 2151-3071 (after EOS)
+    return list(range(2048, 2150)) + list(range(2151, 3072))
+
+
 @dataclass
 class GenerateConfig:
     """Configuration for generation."""
@@ -62,6 +73,14 @@ class GenerateConfig:
     # Or set num_acoustic_codebooks directly for fine control
     quality_mode: str = "balanced"
     num_acoustic_codebooks: Optional[int] = None  # If set, overrides quality_mode
+    # Suppress tokens: list of token IDs to set to -inf before sampling
+    # Default: suppress all tokens 2048-3071 except 2150 (EOS)
+    suppress_tokens: Optional[List[int]] = None
+
+    def __post_init__(self):
+        """Initialize default suppress_tokens if not provided."""
+        if self.suppress_tokens is None:
+            self.suppress_tokens = get_default_suppress_tokens()
 
     def get_num_acoustic_codebooks(self) -> int:
         """Get actual number of acoustic codebooks based on quality_mode or direct setting."""
@@ -180,61 +199,54 @@ class MLXGenerateLoop:
         # For now, skip to test speed
         return logits
 
-    def generate_step(
+    def prefill_step(
         self,
         input_embeds: mx.array,
         config: GenerateConfig,
-        generated_codes: Optional[mx.array] = None,
         debug: bool = False,
-    ) -> Tuple[mx.array, mx.array]:
+    ) -> Tuple[mx.array, mx.array, mx.array]:
         """
-        Generate one step: 16 codec codes.
+        Prefill step: Run Talker on initial input, sample code_0.
+
+        This is the first step of generation. It runs the Talker on the full
+        initial input sequence and samples the first code_0.
 
         Args:
-            input_embeds: Current input embeddings (batch, 1, hidden_size)
+            input_embeds: Initial embeddings (batch, seq_len, hidden_size)
             config: Generation config
-            generated_codes: Previously generated codebook[0] tokens for rep penalty
             debug: Print timing info
 
         Returns:
             Tuple of:
-            - codes: Generated codes for all 16 codebooks (batch, 16)
-            - hidden: Talker hidden states for next step
+            - code_0: First codebook[0] token (batch,)
+            - logits_0: Logits for first code_0 (for debugging)
+            - past_hidden: Hidden state to pass to CodePredictor (batch, 1, hidden_size)
         """
         import time
-        batch_size = input_embeds.shape[0]
-
-        # Reset CodePredictor cache for each step (it generates independently per step)
-        self.cp_cache.reset()
-
         t0 = time.time()
 
-        # 1. Talker forward + codec head
-        compiled_talker = self._get_compiled_talker_step()
-        if compiled_talker is not None:
-            # Use compiled version
-            hidden, logits_0 = compiled_talker(input_embeds, self.talker_cache.get_caches())
-            mx.eval(hidden)
-            mx.eval(logits_0)
-            last_hidden = hidden[:, -1:, :]
-        else:
-            # Non-compiled fallback
-            hidden = self.talker(input_embeds, cache=self.talker_cache.get_caches())
-            mx.eval(hidden)
-            last_hidden = hidden[:, -1:, :]
-            logits_0 = self.codec_head(last_hidden)
-            logits_0 = logits_0[:, -1, :]
+        # Talker forward on full initial input
+        hidden = self.talker(input_embeds, cache=self.talker_cache.get_caches())
+        mx.eval(hidden)
+
+        # Get last hidden state for CodePredictor
+        past_hidden = hidden[:, -1:, :]  # (batch, 1, hidden_size)
+
+        # Get logits for codebook[0]
+        logits_0 = self.codec_head(past_hidden)
+        logits_0 = logits_0[:, -1, :]  # (batch, vocab_size)
 
         t1 = time.time()
         if debug:
-            compile_status = "compiled" if compiled_talker else "uncompiled"
-            print(f"    Talker forward ({compile_status}): {(t1-t0)*1000:.1f}ms")
+            print(f"    Prefill Talker: {(t1-t0)*1000:.1f}ms")
 
-        # Apply repetition penalty
-        if generated_codes is not None:
-            logits_0 = self.apply_repetition_penalty(
-                logits_0, generated_codes, config.repetition_penalty
-            )
+        # Apply suppress_tokens
+        if hasattr(self, '_suppress_mask') and self._suppress_mask is not None:
+            logits_0 = logits_0 + self._suppress_mask
+            if debug:
+                logits_np = np.array(logits_0[0])
+                eos_logit = logits_np[2150]
+                print(f"    Suppression: EOS(2150)={eos_logit:.2f}")
 
         # Sample codebook[0]
         if config.do_sample:
@@ -250,25 +262,83 @@ class MLXGenerateLoop:
         mx.eval(code_0)
         t2 = time.time()
         if debug:
-            print(f"    Codebook[0] sample: {(t2-t1)*1000:.1f}ms")
+            print(f"    Prefill sample: {(t2-t1)*1000:.1f}ms")
 
-        codes = [code_0]
+        return code_0, logits_0, past_hidden
 
-        # 3. CodePredictor for codebook[1-15] (or fewer based on quality_mode)
-        # Use the Talker's last hidden state as input to CodePredictor
-        cp_input = last_hidden  # (batch, 1, hidden_size)
+    def generate_step(
+        self,
+        past_hidden: mx.array,
+        prev_code_0: mx.array,
+        trailing_embed: mx.array,
+        config: GenerateConfig,
+        debug: bool = False,
+    ) -> Tuple[mx.array, mx.array, mx.array]:
+        """
+        Generate one step: Run CodePredictor then Talker.
 
-        num_to_generate = config.get_num_acoustic_codebooks()  # Based on quality_mode
+        PyTorch architecture (Generate mode):
+        1. CodePredictor([past_hidden, embed(prev_code_0)]) → codes[1-15]
+        2. Talker(sum_embeds + trailing) → new logits → sample new code_0
+        3. Return new past_hidden for next step
 
-        for cb_idx in range(num_to_generate):  # 0-14 maps to codebook 1-15
-            # CodePredictor forward
+        Args:
+            past_hidden: Previous Talker hidden state (batch, 1, hidden_size)
+            prev_code_0: Previous step's code_0 (batch,) - used for CodePredictor input
+            trailing_embed: Text/pad embedding to add (batch, 1, hidden_size)
+            config: Generation config
+            debug: Print timing info
+
+        Returns:
+            Tuple of:
+            - codes: All 16 codes for this step (batch, 16)
+            - new_code_0: New code_0 sampled from Talker (batch,)
+            - new_past_hidden: New past_hidden for next step (batch, 1, hidden_size)
+        """
+        import time
+        batch_size = past_hidden.shape[0]
+
+        # Reset CodePredictor cache for each step
+        self.cp_cache.reset()
+
+        t0 = time.time()
+
+        # ==== 1. CodePredictor: Generate codebook[1-15] ====
+        # Input: [past_hidden, embed(prev_code_0)] concatenated
+        prev_code_0_embed = self.talker.codec_embedding(prev_code_0[:, None])  # (batch, 1, hidden_size)
+        cp_initial_input = mx.concatenate([past_hidden, prev_code_0_embed], axis=1)  # (batch, 2, hidden_size)
+
+        # First CodePredictor forward with 2-token input
+        cp_hidden = self.code_predictor(cp_initial_input, cache=self.cp_cache.get_caches())
+        mx.eval(cp_hidden)
+
+        # Get logits for codebook[1] (cb_idx=0)
+        logits_cb = self.code_predictor.get_logits(cp_hidden[:, -1:, :], 0)
+        logits_cb = logits_cb[:, -1, :]
+
+        if config.subtalker_do_sample:
+            code_cb = sample_next_token(
+                logits_cb,
+                temperature=config.subtalker_temperature,
+                top_p=config.subtalker_top_p,
+                top_k=config.subtalker_top_k,
+            )
+        else:
+            code_cb = greedy_sample(logits_cb)
+
+        codes_1_to_15 = [code_cb]
+
+        # Continue CodePredictor for remaining codebooks
+        cp_input = self.code_predictor.embed_codes(code_cb[:, None], 0)
+
+        num_to_generate = config.get_num_acoustic_codebooks()
+
+        for cb_idx in range(1, num_to_generate):  # 1-14 maps to codebook 2-15
             cp_hidden = self.code_predictor(cp_input, cache=self.cp_cache.get_caches())
 
-            # Get logits for this codebook
             logits_cb = self.code_predictor.get_logits(cp_hidden[:, -1:, :], cb_idx)
-            logits_cb = logits_cb[:, -1, :]  # (batch, 2048)
+            logits_cb = logits_cb[:, -1, :]
 
-            # Sample
             if config.subtalker_do_sample:
                 code_cb = sample_next_token(
                     logits_cb,
@@ -279,43 +349,103 @@ class MLXGenerateLoop:
             else:
                 code_cb = greedy_sample(logits_cb)
 
-            codes.append(code_cb)
+            codes_1_to_15.append(code_cb)
+            cp_input = self.code_predictor.embed_codes(code_cb[:, None], cb_idx)
 
-            # Embed this code for next codebook prediction
-            code_embed = self.code_predictor.embed_codes(code_cb[:, None], cb_idx)
-            cp_input = code_embed
-
-        # Pad with zeros if we generated fewer than 15 acoustic codebooks
+        # Pad with zeros if needed
         if num_to_generate < 15:
             zero_code = mx.zeros((batch_size,), dtype=mx.int32)
             for _ in range(15 - num_to_generate):
-                codes.append(zero_code)
+                codes_1_to_15.append(zero_code)
 
-        # Evaluate all CodePredictor codes at once
-        for c in codes[1:]:
+        # Evaluate all codes
+        for c in codes_1_to_15:
             mx.eval(c)
+
+        t1 = time.time()
+        if debug:
+            print(f"    CodePredictor ({num_to_generate} codebooks): {(t1-t0)*1000:.1f}ms")
+
+        # ==== 2. Build next Talker input ====
+        # sum_embeds = embed(prev_code_0) + sum(embed_cp(codes[1-15]))
+        sum_embeds = prev_code_0_embed
+
+        for i, code in enumerate(codes_1_to_15[:num_to_generate]):
+            cb_embed = self.code_predictor.embed_codes(code[:, None], i)
+            sum_embeds = sum_embeds + cb_embed
+
+        # Add trailing text/pad embedding
+        talker_input = sum_embeds + trailing_embed  # (batch, 1, hidden_size)
+
+        # ==== 3. Talker forward for new code_0 ====
+        hidden = self.talker(talker_input, cache=self.talker_cache.get_caches())
+        mx.eval(hidden)
+
+        new_past_hidden = hidden[:, -1:, :]
+
+        # Get logits for new code_0
+        logits_0 = self.codec_head(new_past_hidden)
+        logits_0 = logits_0[:, -1, :]
+
+        t2 = time.time()
+        if debug:
+            print(f"    Talker forward: {(t2-t1)*1000:.1f}ms")
+
+        # Apply suppress_tokens
+        if hasattr(self, '_suppress_mask') and self._suppress_mask is not None:
+            logits_0 = logits_0 + self._suppress_mask
+            if debug:
+                logits_np = np.array(logits_0[0])
+                eos_logit = logits_np[2150]
+                print(f"    Suppression: EOS(2150)={eos_logit:.2f}")
+
+        # Sample new code_0
+        if config.do_sample:
+            new_code_0 = sample_next_token(
+                logits_0,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                top_k=config.top_k,
+            )
+        else:
+            new_code_0 = greedy_sample(logits_0)
+
+        mx.eval(new_code_0)
 
         t3 = time.time()
         if debug:
-            print(f"    CodePredictor ({num_to_generate} codebooks): {(t3-t2)*1000:.1f}ms")
+            print(f"    Sample code_0: {(t3-t2)*1000:.1f}ms")
 
-        # Stack all codes: (batch, 16)
-        all_codes = mx.stack(codes, axis=1)
+        # Build output: [prev_code_0, codes_1_to_15]
+        # Note: This step outputs prev_code_0 (from previous step) + codes[1-15] generated now
+        all_codes = mx.stack([prev_code_0] + codes_1_to_15, axis=1)  # (batch, 16)
 
-        return all_codes, last_hidden
+        return all_codes, new_code_0, new_past_hidden
 
     def generate(
         self,
         input_embeds: mx.array,
         config: Optional[GenerateConfig] = None,
+        trailing_text_hidden: Optional[mx.array] = None,
+        tts_pad_embed: Optional[mx.array] = None,
         debug: bool = False,
     ) -> mx.array:
         """
         Generate codec codes autoregressively.
 
+        Architecture (matching PyTorch):
+        1. Prefill: Talker(initial_embeds) → past_hidden, logits → sample code_0
+        2. Generate loop:
+           a. CodePredictor([past_hidden, embed(code_0)]) → codes[1-15]
+           b. Talker(sum_embeds + trailing) → new past_hidden, logits → sample new code_0
+           c. Output: [code_0, codes[1-15]] for this step
+
         Args:
             input_embeds: Initial embeddings (batch, seq_len, hidden_size)
             config: Generation configuration
+            trailing_text_hidden: Text embeddings to add at each step (batch, text_len, hidden_size)
+                                 If provided, adds trailing_text_hidden[:, step] to each step's input.
+            tts_pad_embed: Padding embedding to use after text exhausted (batch, 1, hidden_size)
             debug: Print timing info for each step
 
         Returns:
@@ -328,12 +458,42 @@ class MLXGenerateLoop:
 
         self.reset_caches()
 
+        # Precompute suppress_tokens mask for efficiency
+        if config.suppress_tokens:
+            vocab_size = 3072
+            mask_np = np.zeros(vocab_size, dtype=np.float32)
+            mask_np[config.suppress_tokens] = float('-inf')
+            self._suppress_mask = mx.array(mask_np)
+        else:
+            self._suppress_mask = None
+
         batch_size = input_embeds.shape[0]
-        generated_codes_0 = []  # For repetition penalty (codebook 0 only)
         all_step_codes = []
 
-        # Process initial input
-        current_embeds = input_embeds
+        # Get text length for trailing_text_hidden
+        text_len = trailing_text_hidden.shape[1] if trailing_text_hidden is not None else 0
+
+        # ==== Prefill: First code_0 ====
+        if debug:
+            print(f"  Prefill:")
+
+        prefill_start = time.time()
+        code_0, logits_0, past_hidden = self.prefill_step(input_embeds, config, debug=debug)
+
+        # Check EOS from prefill
+        if mx.any(code_0 == config.codec_eos_token_id):
+            if debug:
+                print(f"    EOS detected in prefill")
+            # Return empty if EOS in first token
+            return mx.zeros((batch_size, 0, 16), dtype=mx.int32)
+
+        if debug:
+            print(f"    Prefill total: {(time.time() - prefill_start) * 1000:.1f}ms")
+            print(f"    First code_0: {int(code_0[0])}")
+
+        # ==== Generate loop ====
+        current_code_0 = code_0
+        current_past_hidden = past_hidden
 
         for step in range(config.max_new_tokens):
             step_start = time.time()
@@ -341,36 +501,127 @@ class MLXGenerateLoop:
             if debug:
                 print(f"  Step {step + 1}:")
 
+            # Get trailing embedding for this step
+            if trailing_text_hidden is not None and step < text_len:
+                trailing_embed = trailing_text_hidden[:, step:step+1, :]
+            elif tts_pad_embed is not None:
+                trailing_embed = tts_pad_embed
+            else:
+                trailing_embed = mx.zeros((batch_size, 1, input_embeds.shape[2]))
+
             # Generate one step
-            codes, last_hidden = self.generate_step(
-                current_embeds,
+            codes, new_code_0, new_past_hidden = self.generate_step(
+                current_past_hidden,
+                current_code_0,
+                trailing_embed,
                 config,
-                generated_codes=mx.stack(generated_codes_0, axis=1) if generated_codes_0 else None,
                 debug=debug,
             )
 
             all_step_codes.append(codes)
-            generated_codes_0.append(codes[:, 0])
 
             step_end = time.time()
             if debug:
                 print(f"    Step total: {(step_end - step_start) * 1000:.1f}ms")
+                print(f"    code_0={int(codes[0, 0])}, new_code_0={int(new_code_0[0])}")
 
-            # Check EOS
-            if mx.any(codes[:, 0] == config.codec_eos_token_id):
+            # Check EOS in new_code_0 (next step's code_0)
+            if mx.any(new_code_0 == config.codec_eos_token_id):
                 if debug:
                     print(f"    EOS detected at step {step + 1}")
+                # Output final step with EOS
+                # Need to run CodePredictor one more time for final codes
+                final_codes = self._generate_final_step(
+                    current_past_hidden, new_code_0, config, debug
+                )
+                all_step_codes.append(final_codes)
                 break
 
-            # Prepare next input: embed the generated codebook[0] token
-            next_embed = self.talker.codec_embedding(codes[:, 0:1])  # (batch, 1, hidden_size)
-            current_embeds = next_embed
+            # Update for next iteration
+            current_code_0 = new_code_0
+            current_past_hidden = new_past_hidden
 
         # Stack all steps: (batch, num_steps, 16)
+        if len(all_step_codes) == 0:
+            return mx.zeros((batch_size, 0, 16), dtype=mx.int32)
+
         result = mx.stack(all_step_codes, axis=1)
         mx.eval(result)
 
         return result
+
+    def _generate_final_step(
+        self,
+        past_hidden: mx.array,
+        eos_code_0: mx.array,
+        config: GenerateConfig,
+        debug: bool = False,
+    ) -> mx.array:
+        """
+        Generate final step when EOS is detected.
+
+        Only runs CodePredictor to get codes[1-15] for the EOS code_0.
+        """
+        batch_size = past_hidden.shape[0]
+        self.cp_cache.reset()
+
+        # Run CodePredictor with EOS code_0
+        eos_embed = self.talker.codec_embedding(eos_code_0[:, None])
+        cp_input = mx.concatenate([past_hidden, eos_embed], axis=1)
+
+        cp_hidden = self.code_predictor(cp_input, cache=self.cp_cache.get_caches())
+        mx.eval(cp_hidden)
+
+        codes_1_to_15 = []
+        num_to_generate = config.get_num_acoustic_codebooks()
+
+        # First codebook
+        logits_cb = self.code_predictor.get_logits(cp_hidden[:, -1:, :], 0)
+        logits_cb = logits_cb[:, -1, :]
+
+        if config.subtalker_do_sample:
+            code_cb = sample_next_token(
+                logits_cb,
+                temperature=config.subtalker_temperature,
+                top_p=config.subtalker_top_p,
+                top_k=config.subtalker_top_k,
+            )
+        else:
+            code_cb = greedy_sample(logits_cb)
+
+        codes_1_to_15.append(code_cb)
+        cp_input = self.code_predictor.embed_codes(code_cb[:, None], 0)
+
+        # Remaining codebooks
+        for cb_idx in range(1, num_to_generate):
+            cp_hidden = self.code_predictor(cp_input, cache=self.cp_cache.get_caches())
+            logits_cb = self.code_predictor.get_logits(cp_hidden[:, -1:, :], cb_idx)
+            logits_cb = logits_cb[:, -1, :]
+
+            if config.subtalker_do_sample:
+                code_cb = sample_next_token(
+                    logits_cb,
+                    temperature=config.subtalker_temperature,
+                    top_p=config.subtalker_top_p,
+                    top_k=config.subtalker_top_k,
+                )
+            else:
+                code_cb = greedy_sample(logits_cb)
+
+            codes_1_to_15.append(code_cb)
+            cp_input = self.code_predictor.embed_codes(code_cb[:, None], cb_idx)
+
+        # Pad if needed
+        if num_to_generate < 15:
+            zero_code = mx.zeros((batch_size,), dtype=mx.int32)
+            for _ in range(15 - num_to_generate):
+                codes_1_to_15.append(zero_code)
+
+        for c in codes_1_to_15:
+            mx.eval(c)
+
+        all_codes = mx.stack([eos_code_0] + codes_1_to_15, axis=1)
+        return all_codes
 
 
 # ============================================================

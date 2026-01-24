@@ -251,10 +251,11 @@ class Qwen3TTSTalkerMLX(nn.Module):
         # codec_embedding: (3072, 1024) - matches hidden_size
         self.codec_embedding = nn.Embedding(config.codec_vocab_size, config.hidden_size)
 
-        # Text projection: 2048 -> 1024 (matches PyTorch text_projection)
-        # This is a ResizeMLP in PyTorch: fc1 -> act -> fc2
-        self.text_projection_fc1 = nn.Linear(config.text_hidden_size, config.hidden_size, bias=False)
-        self.text_projection_fc2 = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        # Text projection: 2048 -> 2048 -> 1024 (matches PyTorch Qwen3TTSTalkerResizeMLP)
+        # ResizeMLP: FC1(2048, 2048) -> SiLU -> FC2(2048, 1024)
+        # Note: Original has bias=True, but weights file doesn't include bias (may be zeros)
+        self.text_projection_fc1 = nn.Linear(config.text_hidden_size, config.text_hidden_size, bias=False)
+        self.text_projection_fc2 = nn.Linear(config.text_hidden_size, config.hidden_size, bias=False)
 
         # Transformer layers
         self.layers = [TransformerBlock(config) for _ in range(config.num_hidden_layers)]

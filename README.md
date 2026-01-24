@@ -7,6 +7,34 @@
 Qwen3-TTS optimized for Apple Silicon without CUDA.
 Achieves **14.8x speedup** through MLX hybrid pipeline.
 
+## Why This Exists
+
+### The Problem
+
+[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) is an excellent open-source TTS model with voice cloning capabilities. However:
+
+- **CUDA-centric**: Designed for NVIDIA GPUs
+- **Unusable on Mac**: 98 seconds for 28 characters on CPU
+- **No Apple Silicon optimization**: MPS fails due to conv1d channel limits
+
+### The Solution
+
+This project bridges the gap by porting the performance-critical audio decoder to [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework:
+
+| Before | After | Improvement |
+|--------|-------|-------------|
+| 98s / 28 chars | 8s / 28 chars | **12x faster** |
+| 462s / 97 chars | 31s / 97 chars | **14.8x faster** |
+
+### Who This Helps
+
+| User | Need |
+|------|------|
+| **Mac Developers** | Local TTS without cloud dependency |
+| **Privacy-Conscious** | Keep voice data on-device |
+| **Hobbyists** | Add voices to characters/projects |
+| **Cost-Conscious** | Avoid API fees for TTS |
+
 ## Features
 
 - **No CUDA Required**: Runs on Apple Silicon (M1/M2/M3/M4) CPU
@@ -140,11 +168,31 @@ PyTorch                          MLX
 | aiden | Sunny American male | English |
 | sohee | Warm female, rich emotion | Korean |
 
+## Roadmap
+
+Further optimization opportunities:
+
+| Improvement | Expected Impact | Status |
+|-------------|-----------------|--------|
+| **Full MLX Native** | Remove PyTorch dependency, 2-3x faster | 🔬 Research |
+| **Streaming Output** | Lower time-to-first-audio | 📋 Planned |
+| **mlx-audio Integration** | Ecosystem contribution | 📋 Planned |
+| **Standalone CLI** | `pip install eris-voice` | 📋 Planned |
+
 ## Limitations
 
 - **MPS (Apple GPU)**: Audio Decoder exceeds conv1d 65536ch limit
 - **float16**: May cause numerical instability on CPU (use bfloat16)
 - **Pre-transformer**: Not yet ported to MLX (<0.5% of total time)
+
+## Acknowledgments
+
+This project builds upon:
+
+- **[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** by Alibaba (Apache 2.0) - The underlying TTS model
+- **[MLX](https://github.com/ml-explore/mlx)** by Apple - Machine learning framework for Apple Silicon
+
+The MLX weight files (`decoder_weights_mlx.npz`, `quantizer_weights_mlx.npz`) are derived from Qwen3-TTS pretrained models under the Apache 2.0 license.
 
 ## Links
 

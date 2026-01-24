@@ -49,8 +49,8 @@ def get_pipeline():
     """Get or create the TTS pipeline."""
     global _pipeline
     if _pipeline is None:
-        from streaming_prototype import StreamingTTSPipeline
-        _pipeline = StreamingTTSPipeline()
+        from mlx_pipeline import MLXFullPipeline
+        _pipeline = MLXFullPipeline()
         _pipeline.load()
     return _pipeline
 
@@ -65,8 +65,8 @@ def warmup_pipeline():
     pipeline = get_pipeline()
     start = time.time()
 
-    # Generate a short phrase to warm up all components
-    _ = pipeline.generate_sentence("テスト", speaker="ono_anna")
+    # Generate a short phrase to warm up all components (JIT compile)
+    _, _ = pipeline.generate("テスト", speaker="ono_anna", quality_mode="fast")
 
     print(f"Warmup complete in {time.time() - start:.2f}s")
     _warmup_done = True
@@ -179,17 +179,16 @@ async def status():
 
 @app.post("/speak", response_model=SpeakResponse)
 async def speak(request: SpeakRequest):
-    """Generate speech from text."""
+    """Generate speech from text using MLX Full Pipeline."""
     try:
         pipeline = get_pipeline()
 
-        # TODO: Pass quality_mode to MLX generate loop once fully integrated
-        # num_codebooks = QUALITY_PRESETS.get(request.quality_mode, 11)
-        # Currently using PyTorch generation, quality_mode is prepared for MLX integration
-
-        start = time.time()
-        audio = pipeline.generate_sentence(request.text, speaker=request.speaker)
-        generation_time = time.time() - start
+        # Generate with quality_mode (MLX Generate Loop)
+        audio, generation_time = pipeline.generate(
+            text=request.text,
+            speaker=request.speaker,
+            quality_mode=request.quality_mode,
+        )
 
         duration = len(audio) / 24000
         rtf = duration / generation_time
@@ -236,7 +235,7 @@ async def speak(request: SpeakRequest):
 
 @app.post("/stream", response_model=StreamResponse)
 async def stream(request: StreamRequest):
-    """Generate speech with sentence-level streaming."""
+    """Generate speech with sentence-level streaming using MLX Full Pipeline."""
     try:
         pipeline = get_pipeline()
 
@@ -248,6 +247,7 @@ async def stream(request: StreamRequest):
         for audio, sentence_text, elapsed in pipeline.generate_streaming(
             request.text,
             speaker=request.speaker,
+            quality_mode=request.quality_mode,
             play_immediately=request.play_as_generated,
         ):
             if ttfa is None:

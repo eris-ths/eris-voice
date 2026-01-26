@@ -1,49 +1,21 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
+*.class
+.env
 venv/
 ENV/
-env/
+.venv/
+build/
+dist/
+*.egg-info/
 
-# Audio files (generated)
+# Local Models and Assets
+Qwen3-TTS-12Hz-1.7B-CustomVoice/
 *.wav
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Model cache (large)
-.cache/
-models/
-
-# Claude Code internal
-data/
-
-# MLX weights (large files)
 *.npz
+archive/test_outputs/
+
+# Session management
+qwen3_tts_eris_voice_resume.md
+data/sync/
+src/data/sync/

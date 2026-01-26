@@ -623,6 +623,120 @@ class MLXGenerateLoop:
         all_codes = mx.stack([eos_code_0] + codes_1_to_15, axis=1)
         return all_codes
 
+    def generate_streaming(
+        self,
+        input_embeds: mx.array,
+        config: Optional[GenerateConfig] = None,
+        trailing_text_hidden: Optional[mx.array] = None,
+        tts_pad_embed: Optional[mx.array] = None,
+        buffer_size: int = 5,
+        debug: bool = False,
+    ):
+        """
+        Generate codec codes with streaming output.
+
+        Yields codes in chunks of buffer_size steps for progressive decoding.
+
+        Args:
+            input_embeds: Initial embeddings (batch, seq_len, hidden_size)
+            config: Generation configuration
+            trailing_text_hidden: Text embeddings for each step
+            tts_pad_embed: Padding embedding after text exhausted
+            buffer_size: Number of steps to buffer before yielding
+            debug: Print timing info
+
+        Yields:
+            (codes_chunk, is_final): codes_chunk is (batch, chunk_steps, 16),
+                                     is_final indicates if this is the last chunk
+        """
+        import time
+
+        if config is None:
+            config = GenerateConfig()
+
+        self.reset_caches()
+
+        # Precompute suppress_tokens mask
+        if config.suppress_tokens:
+            vocab_size = 3072
+            mask_np = np.zeros(vocab_size, dtype=np.float32)
+            mask_np[config.suppress_tokens] = float('-inf')
+            self._suppress_mask = mx.array(mask_np)
+        else:
+            self._suppress_mask = None
+
+        batch_size = input_embeds.shape[0]
+        buffered_codes = []
+
+        text_len = trailing_text_hidden.shape[1] if trailing_text_hidden is not None else 0
+
+        # ==== Prefill ====
+        prefill_start = time.time()
+        code_0, logits_0, past_hidden = self.prefill_step(input_embeds, config, debug=debug)
+
+        if mx.any(code_0 == config.codec_eos_token_id):
+            return  # EOS in prefill, nothing to yield
+
+        if debug:
+            print(f"  Prefill: {(time.time() - prefill_start) * 1000:.1f}ms")
+
+        # ==== Generate loop with buffered yield ====
+        current_code_0 = code_0
+        current_past_hidden = past_hidden
+
+        for step in range(config.max_new_tokens):
+            # Get trailing embedding
+            if trailing_text_hidden is not None and step < text_len:
+                trailing_embed = trailing_text_hidden[:, step:step+1, :]
+            elif tts_pad_embed is not None:
+                trailing_embed = tts_pad_embed
+            else:
+                trailing_embed = mx.zeros((batch_size, 1, input_embeds.shape[2]))
+
+            # Generate one step
+            codes, new_code_0, new_past_hidden = self.generate_step(
+                current_past_hidden,
+                current_code_0,
+                trailing_embed,
+                config,
+                debug=debug,
+            )
+
+            buffered_codes.append(codes)
+
+            # Check for EOS
+            is_eos = mx.any(new_code_0 == config.codec_eos_token_id)
+
+            if is_eos:
+                # Generate final step
+                final_codes = self._generate_final_step(
+                    current_past_hidden, new_code_0, config, debug
+                )
+                buffered_codes.append(final_codes)
+
+                # Yield remaining buffer
+                if buffered_codes:
+                    result = mx.stack(buffered_codes, axis=1)
+                    mx.eval(result)
+                    yield result, True
+                return
+
+            # Yield when buffer is full
+            if len(buffered_codes) >= buffer_size:
+                result = mx.stack(buffered_codes, axis=1)
+                mx.eval(result)
+                yield result, False
+                buffered_codes = []
+
+            current_code_0 = new_code_0
+            current_past_hidden = new_past_hidden
+
+        # Yield any remaining codes (max tokens reached)
+        if buffered_codes:
+            result = mx.stack(buffered_codes, axis=1)
+            mx.eval(result)
+            yield result, True
+
 
 # ============================================================
 # Tests

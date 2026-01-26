@@ -56,7 +56,7 @@ def get_pipeline():
 
 
 def warmup_pipeline():
-    """Warmup the pipeline with a short generation."""
+    """Warmup the pipeline with multiple generations for stable JIT compilation."""
     global _warmup_done
     if _warmup_done:
         return
@@ -65,8 +65,13 @@ def warmup_pipeline():
     pipeline = get_pipeline()
     start = time.time()
 
-    # Generate a short phrase to warm up all components (JIT compile)
-    _, _ = pipeline.generate("テスト", speaker="ono_anna", quality_mode="fast")
+    # Multiple warmup generations to stabilize JIT compilation
+    # First few runs are slower due to MLX JIT compilation
+    warmup_texts = ["テスト", "こんにちは", "私はエリスよ"]
+    for i, text in enumerate(warmup_texts):
+        gen_start = time.time()
+        _, gen_time = pipeline.generate(text, speaker="ono_anna", quality_mode="balanced")
+        print(f"  Warmup {i+1}/{len(warmup_texts)}: {gen_time:.2f}s")
 
     print(f"Warmup complete in {time.time() - start:.2f}s")
     _warmup_done = True

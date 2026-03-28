@@ -53,12 +53,13 @@ class CodePredictorConfig:
 
 
 def create_attention_mask(h: mx.array, cache: Optional[Any] = None) -> Optional[mx.array]:
-    """Create causal attention mask."""
+    """Create causal attention mask for mx.fast.scaled_dot_product_attention."""
     T = h.shape[1]
     if T == 1:
+        # Single token decode: no mask needed (causal by construction)
         return None
 
-    # Causal mask
+    # Prefill: use additive causal mask
     mask = mx.triu(mx.full((T, T), -mx.inf), k=1)
 
     if cache is not None and cache.offset > 0:
@@ -67,36 +68,6 @@ def create_attention_mask(h: mx.array, cache: Optional[Any] = None) -> Optional[
         mask = mx.concatenate([prefix, mask], axis=1)
 
     return mask
-
-
-def scaled_dot_product_attention(
-    queries: mx.array,
-    keys: mx.array,
-    values: mx.array,
-    scale: float,
-    mask: Optional[mx.array] = None,
-) -> mx.array:
-    """Scaled dot-product attention."""
-    # queries: (B, n_heads, L, head_dim)
-    # keys: (B, n_kv_heads, S, head_dim)
-    # values: (B, n_kv_heads, S, head_dim)
-
-    n_heads = queries.shape[1]
-    n_kv_heads = keys.shape[1]
-
-    # GQA: repeat k/v heads if needed
-    if n_kv_heads < n_heads:
-        n_rep = n_heads // n_kv_heads
-        keys = mx.repeat(keys, n_rep, axis=1)
-        values = mx.repeat(values, n_rep, axis=1)
-
-    scores = (queries @ keys.transpose(0, 1, 3, 2)) * scale
-
-    if mask is not None:
-        scores = scores + mask
-
-    weights = mx.softmax(scores, axis=-1)
-    return weights @ values
 
 
 class RoPE(nn.Module):
@@ -189,8 +160,10 @@ class Attention(nn.Module):
         if cache is not None:
             keys, values = cache.update_and_fetch(keys, values)
 
-        # Attention
-        output = scaled_dot_product_attention(queries, keys, values, scale=self.scale, mask=mask)
+        # Metal-accelerated attention with native GQA support
+        output = mx.fast.scaled_dot_product_attention(
+            queries, keys, values, scale=self.scale, mask=mask
+        )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
         return self.o_proj(output)
@@ -363,27 +336,6 @@ class Qwen3TTSCodePredictorMLX(nn.Module):
     def get_logits(self, hidden: mx.array, codebook_idx: int) -> mx.array:
         """Get logits for a specific codebook."""
         return self.lm_head[codebook_idx](hidden)
-
-
-class KVCache:
-    """Key-Value cache for incremental generation."""
-
-    def __init__(self):
-        self.keys = None
-        self.values = None
-        self.offset = 0
-
-    def update_and_fetch(self, keys: mx.array, values: mx.array) -> Tuple[mx.array, mx.array]:
-        """Update cache and return full key/value tensors."""
-        if self.keys is None:
-            self.keys = keys
-            self.values = values
-        else:
-            self.keys = mx.concatenate([self.keys, keys], axis=2)
-            self.values = mx.concatenate([self.values, values], axis=2)
-
-        self.offset = self.keys.shape[2]
-        return self.keys, self.values
 
 
 def convert_pytorch_weights(pt_state_dict: dict) -> Dict[str, mx.array]:

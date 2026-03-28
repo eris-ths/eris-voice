@@ -299,7 +299,7 @@ class MLXFullPipeline:
         self._warmed_up = True
         print("  Warmup complete!")
 
-    def _extract_pytorch_inputs(self, text: str, speaker: str = "ono_anna"):
+    def _extract_pytorch_inputs(self, text: str, speaker: str = "ono_anna", instruct: str = ""):
         """
         Extract inputs_embeds, trailing_text_hidden, tts_pad_embed from PyTorch model.
 
@@ -324,12 +324,11 @@ class MLXFullPipeline:
         model.model.talker.generate = patched_generate
 
         try:
+            kwargs = dict(text=text, language="Japanese", speaker=speaker)
+            if instruct:
+                kwargs["instruct"] = instruct
             with torch.no_grad():
-                model.generate_custom_voice(
-                    text=text,
-                    language="Japanese",
-                    speaker=speaker,
-                )
+                model.generate_custom_voice(**kwargs)
         except CaptureComplete:
             pass
         finally:
@@ -347,6 +346,7 @@ class MLXFullPipeline:
         text: str,
         speaker: str = "ono_anna",
         quality_mode: str = "balanced",
+        instruct: str = "",
         debug: bool = False,
     ) -> Tuple[np.ndarray, float]:
         """
@@ -376,7 +376,7 @@ class MLXFullPipeline:
 
         # 1. Extract embeddings from PyTorch (text processing only)
         initial_embeds, trailing_text_hidden, tts_pad_embed = self._extract_pytorch_inputs(
-            text, speaker
+            text, speaker, instruct=instruct
         )
 
         if debug:
@@ -418,6 +418,7 @@ class MLXFullPipeline:
         text: str,
         speaker: str = "ono_anna",
         quality_mode: str = "balanced",
+        instruct: str = "",
         first_chunk_steps: int = 10,
         play_immediately: bool = False,
     ):
@@ -456,7 +457,7 @@ class MLXFullPipeline:
 
         # Extract embeddings from PyTorch
         initial_embeds, trailing_text_hidden, tts_pad_embed = self._extract_pytorch_inputs(
-            text, speaker
+            text, speaker, instruct=instruct
         )
 
         # Setup config
@@ -585,6 +586,7 @@ class MLXFullPipeline:
         text: str,
         speaker: str = "ono_anna",
         quality_mode: str = "balanced",
+        instruct: str = "",
         play_immediately: bool = False,
     ):
         """
@@ -606,7 +608,7 @@ class MLXFullPipeline:
         start_time = time.time()
 
         for i, sentence in enumerate(sentences):
-            audio, _ = self.generate(sentence, speaker, quality_mode)
+            audio, _ = self.generate(sentence, speaker, quality_mode, instruct=instruct)
             elapsed = time.time() - start_time
 
             if play_immediately:

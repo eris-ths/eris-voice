@@ -103,7 +103,7 @@ class MLXGenerateLoop:
         talker: Qwen3TTSTalkerMLX,
         code_predictor: Qwen3TTSCodePredictorMLX,
         codec_head_weight: mx.array,
-        use_compile: bool = False,  # TODO: Enable after KVCache refactor to array-based
+        use_compile: bool = False,  # Tested: no benefit with mx.fast SDPA (already Metal-optimized)
     ):
         """
         Initialize generator.

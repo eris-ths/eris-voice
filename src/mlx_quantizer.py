@@ -42,11 +42,8 @@ class EuclideanCodebookMLX:
         # These will be loaded from weights
         self.embedding_sum = mx.zeros((codebook_size, dim))
         self.cluster_usage = mx.ones((codebook_size,))
-
-    @property
-    def embedding(self) -> mx.array:
-        """Compute actual embedding from EMA stats."""
-        return self.embedding_sum / mx.maximum(
+        # Pre-computed embedding; recomputed in load_weights() after real weights are set
+        self.embedding = self.embedding_sum / mx.maximum(
             self.cluster_usage[:, None], self.epsilon
         )
 
@@ -277,5 +274,13 @@ class SplitResidualVectorQuantizerMLX:
             layer.codebook.cluster_usage = _get_weight(
                 weights, f"{prefix}.cluster_usage"
             )
+
+        # Pre-compute embeddings for all codebooks
+        for rvq in [self.rvq_first, self.rvq_rest]:
+            for layer in rvq.vq.layers:
+                cb = layer.codebook
+                cb.embedding = cb.embedding_sum / mx.maximum(
+                    cb.cluster_usage[:, None], cb.epsilon
+                )
 
         print("Quantizer weights loaded successfully!")

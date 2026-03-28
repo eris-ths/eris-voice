@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-MLX KV Cache for Qwen3-TTS
+MLX KV Cache for Qwen3-TTS (Pre-allocated Buffer)
 
-Key-Value cache for efficient incremental (autoregressive) generation.
-Manages caches for multiple transformer layers.
+Pre-allocated key-value cache for efficient autoregressive generation.
+Based on MLX-LM's KVCache (v0.26.3) — O(1) per-step updates via slice assignment.
+
+Previous implementation used mx.concatenate per step = O(n) copy = O(n^2) total.
+This implementation pre-allocates in 256-token chunks and uses slice assignment.
 """
 
 from typing import List, Tuple, Optional
@@ -12,20 +15,19 @@ import mlx.core as mx
 
 class KVCache:
     """
-    Key-Value cache for a single attention layer.
+    Pre-allocated Key-Value cache for a single attention layer.
 
-    Stores accumulated keys and values for incremental generation.
+    Allocates buffers in chunks of `step` tokens. Updates via slice assignment
+    instead of concatenation, giving O(1) per-step cost.
+
+    Shape: (batch, n_kv_heads, seq_len, head_dim)
     """
 
-    def __init__(self):
+    def __init__(self, step: int = 256):
         self.keys: Optional[mx.array] = None
         self.values: Optional[mx.array] = None
-        self._offset: int = 0
-
-    @property
-    def offset(self) -> int:
-        """Current cache offset (number of cached tokens)."""
-        return self._offset
+        self.offset: int = 0
+        self.step = step
 
     def update_and_fetch(
         self,
@@ -35,28 +37,51 @@ class KVCache:
         """
         Update cache with new keys/values and return full accumulated tensors.
 
+        On first call or buffer overflow: allocates/extends in chunks of `step`.
+        Otherwise: O(1) slice assignment.
+
         Args:
             keys: New keys (batch, n_kv_heads, seq_len, head_dim)
             values: New values (batch, n_kv_heads, seq_len, head_dim)
 
         Returns:
-            Tuple of (all_keys, all_values) including cached
+            Tuple of (all_keys, all_values) up to current offset
         """
-        if self.keys is None:
-            self.keys = keys
-            self.values = values
-        else:
-            self.keys = mx.concatenate([self.keys, keys], axis=2)
-            self.values = mx.concatenate([self.values, values], axis=2)
+        prev = self.offset
 
-        self._offset = self.keys.shape[2]
-        return self.keys, self.values
+        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:
+            # Need to allocate or extend buffer
+            B, n_kv_heads, _, k_head_dim = keys.shape
+            v_head_dim = values.shape[3]
+            n_steps = (self.step + keys.shape[2] - 1) // self.step
+            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
+            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
+            new_k = mx.zeros(k_shape, keys.dtype)
+            new_v = mx.zeros(v_shape, values.dtype)
+
+            if self.keys is not None:
+                # Extend existing buffer
+                if prev % self.step != 0:
+                    self.keys = self.keys[..., :prev, :]
+                    self.values = self.values[..., :prev, :]
+                self.keys = mx.concatenate([self.keys, new_k], axis=2)
+                self.values = mx.concatenate([self.values, new_v], axis=2)
+            else:
+                # First allocation
+                self.keys, self.values = new_k, new_v
+
+        # O(1) slice assignment
+        self.offset += keys.shape[2]
+        self.keys[..., prev : self.offset, :] = keys
+        self.values[..., prev : self.offset, :] = values
+
+        return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
 
     def reset(self):
         """Clear the cache for a new generation."""
         self.keys = None
         self.values = None
-        self._offset = 0
+        self.offset = 0
 
 
 class MultiLayerKVCache:
@@ -67,18 +92,11 @@ class MultiLayerKVCache:
         cache = MultiLayerKVCache(num_layers=28)
         for step in range(max_steps):
             output = model(input, cache=cache.get_caches())
-            # caches are automatically updated during forward pass
     """
 
-    def __init__(self, num_layers: int):
-        """
-        Initialize caches for all layers.
-
-        Args:
-            num_layers: Number of transformer layers
-        """
+    def __init__(self, num_layers: int, step: int = 256):
         self.num_layers = num_layers
-        self.caches = [KVCache() for _ in range(num_layers)]
+        self.caches = [KVCache(step=step) for _ in range(num_layers)]
 
     def get_caches(self) -> List[KVCache]:
         """Get list of caches for all layers."""
@@ -104,26 +122,28 @@ class MultiLayerKVCache:
 # ============================================================
 
 def test_kv_cache():
-    """Test KVCache functionality."""
+    """Test KVCache with pre-allocated buffers."""
     print("=" * 50)
-    print("KV Cache Tests")
+    print("KV Cache Tests (Pre-allocated)")
     print("=" * 50)
     print()
 
     # Test 1: Basic cache update
     print("Test 1: Basic cache update")
-    cache = KVCache()
+    cache = KVCache(step=256)
 
     # First token
-    k1 = mx.random.normal((1, 8, 1, 128))  # (batch, n_kv_heads, seq=1, head_dim)
+    k1 = mx.random.normal((1, 8, 1, 128))
     v1 = mx.random.normal((1, 8, 1, 128))
 
     all_k, all_v = cache.update_and_fetch(k1, v1)
     mx.eval(all_k, all_v)
 
     print(f"  After 1st token: keys={all_k.shape}, offset={cache.offset}")
-    assert all_k.shape == (1, 8, 1, 128)
+    assert all_k.shape == (1, 8, 1, 128), f"Expected (1,8,1,128), got {all_k.shape}"
     assert cache.offset == 1
+    # Verify buffer was pre-allocated
+    assert cache.keys.shape[2] == 256, f"Expected pre-allocated 256, got {cache.keys.shape[2]}"
 
     # Second token
     k2 = mx.random.normal((1, 8, 1, 128))
@@ -135,6 +155,8 @@ def test_kv_cache():
     print(f"  After 2nd token: keys={all_k.shape}, offset={cache.offset}")
     assert all_k.shape == (1, 8, 2, 128)
     assert cache.offset == 2
+    # Buffer should NOT have grown
+    assert cache.keys.shape[2] == 256
 
     # Third token
     k3 = mx.random.normal((1, 8, 1, 128))
@@ -154,62 +176,88 @@ def test_kv_cache():
     assert cache.offset == 0
     assert cache.keys is None
 
+    # Test 3: Prefill (multi-token)
+    print("\nTest 3: Prefill with multiple tokens")
+    cache = KVCache(step=256)
+    k_prefill = mx.random.normal((1, 8, 20, 128))
+    v_prefill = mx.random.normal((1, 8, 20, 128))
+
+    all_k, all_v = cache.update_and_fetch(k_prefill, v_prefill)
+    mx.eval(all_k, all_v)
+
+    print(f"  After prefill: keys={all_k.shape}, offset={cache.offset}")
+    assert all_k.shape == (1, 8, 20, 128)
+    assert cache.offset == 20
+    assert cache.keys.shape[2] == 256  # Pre-allocated
+
+    # Test 4: Buffer extension
+    print("\nTest 4: Buffer extension past 256")
+    cache = KVCache(step=4)  # Small step for testing
+    for i in range(6):
+        k = mx.random.normal((1, 8, 1, 128))
+        v = mx.random.normal((1, 8, 1, 128))
+        all_k, all_v = cache.update_and_fetch(k, v)
+        mx.eval(all_k, all_v)
+
+    print(f"  After 6 tokens (step=4): keys={all_k.shape}, offset={cache.offset}")
+    assert all_k.shape == (1, 8, 6, 128)
+    assert cache.offset == 6
+    assert cache.keys.shape[2] == 8  # 4 + 4
+
+    # Test 5: Value correctness
+    print("\nTest 5: Value correctness")
+    cache = KVCache(step=256)
+    k1 = mx.ones((1, 8, 1, 128))
+    v1 = mx.ones((1, 8, 1, 128)) * 2
+    k2 = mx.ones((1, 8, 1, 128)) * 3
+    v2 = mx.ones((1, 8, 1, 128)) * 4
+
+    cache.update_and_fetch(k1, v1)
+    all_k, all_v = cache.update_and_fetch(k2, v2)
+    mx.eval(all_k, all_v)
+
+    assert mx.allclose(all_k[0, 0, 0, 0], mx.array(1.0)), "First key should be 1.0"
+    assert mx.allclose(all_k[0, 0, 1, 0], mx.array(3.0)), "Second key should be 3.0"
+    assert mx.allclose(all_v[0, 0, 0, 0], mx.array(2.0)), "First value should be 2.0"
+    assert mx.allclose(all_v[0, 0, 1, 0], mx.array(4.0)), "Second value should be 4.0"
+    print("  Values match!")
+
     print("\n✅ KVCache tests passed!")
 
 
 def test_multi_layer_cache():
-    """Test MultiLayerKVCache functionality."""
+    """Test MultiLayerKVCache."""
     print("\n" + "=" * 50)
     print("Multi-Layer KV Cache Tests")
     print("=" * 50)
     print()
 
-    # Test 1: Create multi-layer cache
-    print("Test 1: Create multi-layer cache")
     num_layers = 28
     cache = MultiLayerKVCache(num_layers)
     print(f"  Created cache for {len(cache)} layers")
     assert len(cache) == num_layers
 
-    # Test 2: Get caches
-    print("\nTest 2: Get caches list")
-    caches = cache.get_caches()
-    print(f"  Got {len(caches)} caches")
-    assert len(caches) == num_layers
-    assert all(isinstance(c, KVCache) for c in caches)
-
-    # Test 3: Update caches (simulating forward pass)
-    print("\nTest 3: Simulate forward pass updates")
-
-    # Simulate adding one token to all layers
-    for i, c in enumerate(caches):
+    # Simulate forward pass
+    for c in cache.get_caches():
         k = mx.random.normal((1, 8, 1, 128))
         v = mx.random.normal((1, 8, 1, 128))
         c.update_and_fetch(k, v)
 
-    offset = cache.get_offset()
-    print(f"  After 1 token: offset={offset}")
-    assert offset == 1
+    assert cache.get_offset() == 1
 
-    # Add another token
-    for c in caches:
+    # Second token
+    for c in cache.get_caches():
         k = mx.random.normal((1, 8, 1, 128))
         v = mx.random.normal((1, 8, 1, 128))
         c.update_and_fetch(k, v)
 
-    offset = cache.get_offset()
-    print(f"  After 2 tokens: offset={offset}")
-    assert offset == 2
+    assert cache.get_offset() == 2
 
-    # Test 4: Reset all
-    print("\nTest 4: Reset all caches")
+    # Reset
     cache.reset()
-    offset = cache.get_offset()
-    print(f"  After reset: offset={offset}")
-    assert offset == 0
-    assert all(c.keys is None for c in caches)
+    assert cache.get_offset() == 0
 
-    print("\n✅ MultiLayerKVCache tests passed!")
+    print("✅ MultiLayerKVCache tests passed!")
 
 
 if __name__ == "__main__":

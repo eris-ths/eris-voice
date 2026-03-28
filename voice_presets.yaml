@@ -1,0 +1,26 @@
+# Eris Voice Presets
+# instruct に渡すテンプレート。{text} はプレースホルダとして将来利用可能
+
+default:
+  description: "エリスの標準声"
+  instruct: "A 20-year-old cute Japanese anime girl voice, high-pitched and cheerful"
+
+playful:
+  description: "デレ、はしゃぎ、甘え"
+  instruct: "A 15-year-old cute Japanese anime girl voice, high-pitched and cheerful"
+
+calm:
+  description: "冷静、解説、落ち着いた語り"
+  instruct: "A 25-year-old cute Japanese anime girl voice, high-pitched and cheerful"
+
+gentle:
+  description: "優しく穏やか"
+  instruct: "A 20-year-old cute young Japanese woman speaking gently with a soft, playful voice"
+
+serious:
+  description: "真剣、忠告"
+  instruct: "A 20-year-old Japanese woman speaking clearly with a calm, serious tone"
+
+whisper:
+  description: "囁き、秘密話"
+  instruct: "A 20-year-old cute young Japanese woman speaking softly with a gentle, whispery voice"

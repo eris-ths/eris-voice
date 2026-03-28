@@ -32,6 +32,7 @@ from mlx_talker import Qwen3TTSTalkerMLX, TalkerConfig
 from mlx_code_predictor import Qwen3TTSCodePredictorMLX, CodePredictorConfig, load_code_predictor_weights
 from mlx_decoder_v2 import Qwen3TTSDecoderMLX
 from mlx_quantizer import SplitResidualVectorQuantizerMLX
+from mlx_text_encoder import MLXTextEncoder
 
 
 # Speaker tokens (from Qwen3-TTS)
@@ -92,15 +93,16 @@ class MLXFullPipeline:
 
         # MLX models
         self.talker = None
+        self.text_encoder = None  # MLX TextEncoder (replaces PyTorch for text processing)
         self.code_predictor = None
         self.codec_head_weight = None
         self.generator = None
         self.mlx_decoder = None
         self.mlx_quantizer = None
 
-        # PyTorch model (for text processing only)
+        # PyTorch model (only for audio decoder pre-conv/upsample)
         self._pt_model = None
-        self.pt_decoder = None  # For pre-conv/upsample (still PyTorch)
+        self.pt_decoder = None
 
         self.sample_rate = 24000
         self._loaded = False
@@ -158,9 +160,13 @@ class MLXFullPipeline:
         decoder_weights = dict(mx.load(str(decoder_weights_path)))
         self.mlx_decoder.load_weights(decoder_weights)
 
-        # 6. PyTorch model (for text embedding extraction only)
-        print("  Loading PyTorch model...")
-        self._get_or_create_pt_model()
+        # 6. MLX TextEncoder (replaces PyTorch model for text processing)
+        print("  Loading MLX TextEncoder...")
+        self.text_encoder = MLXTextEncoder(self.talker)
+
+        # 7. PyTorch model (only for audio decoder pre-conv/upsample — lazy loaded)
+        print("  Loading PyTorch decoder...")
+        self._get_or_create_pt_decoder()
 
         self._loaded = True
         print("MLX Full Pipeline loaded!")
@@ -299,47 +305,13 @@ class MLXFullPipeline:
         self._warmed_up = True
         print("  Warmup complete!")
 
-    def _extract_pytorch_inputs(self, text: str, speaker: str = "ono_anna", instruct: str = ""):
+    def _extract_inputs(self, text: str, speaker: str = "ono_anna", instruct: str = ""):
         """
-        Extract inputs_embeds, trailing_text_hidden, tts_pad_embed from PyTorch model.
+        Extract inputs_embeds, trailing_text_hidden, tts_pad_embed using MLX TextEncoder.
 
-        This uses PyTorch only for text tokenization and embedding extraction.
-        The actual generation is done by MLX.
+        Pure MLX — no PyTorch dependency for text processing.
         """
-        model = self._get_or_create_pt_model()
-
-        captured = {}
-        original_generate = model.model.talker.generate
-
-        class CaptureComplete(Exception):
-            """Custom exception to signal capture completion."""
-            pass
-
-        def patched_generate(inputs_embeds, trailing_text_hidden, tts_pad_embed, **kwargs):
-            captured['inputs_embeds'] = inputs_embeds.detach().clone()
-            captured['trailing_text_hidden'] = trailing_text_hidden.detach().clone()
-            captured['tts_pad_embed'] = tts_pad_embed.detach().clone()
-            raise CaptureComplete()
-
-        model.model.talker.generate = patched_generate
-
-        try:
-            kwargs = dict(text=text, language="Japanese", speaker=speaker)
-            if instruct:
-                kwargs["instruct"] = instruct
-            with torch.no_grad():
-                model.generate_custom_voice(**kwargs)
-        except CaptureComplete:
-            pass
-        finally:
-            # Always restore original function
-            model.model.talker.generate = original_generate
-
-        return (
-            mx.array(captured['inputs_embeds'].cpu().float().numpy()),
-            mx.array(captured['trailing_text_hidden'].cpu().float().numpy()),
-            mx.array(captured['tts_pad_embed'].cpu().float().numpy()),
-        )
+        return self.text_encoder.encode(text, speaker=speaker, instruct=instruct)
 
     def generate(
         self,
@@ -375,7 +347,7 @@ class MLXFullPipeline:
         start = time.time()
 
         # 1. Extract embeddings from PyTorch (text processing only)
-        initial_embeds, trailing_text_hidden, tts_pad_embed = self._extract_pytorch_inputs(
+        initial_embeds, trailing_text_hidden, tts_pad_embed = self._extract_inputs(
             text, speaker, instruct=instruct
         )
 
@@ -386,7 +358,7 @@ class MLXFullPipeline:
         # 2. MLX Generate Loop
         config = GenerateConfig(
             max_new_tokens=500,
-            temperature=0.7,  # Lower for more stable EOS detection
+            temperature=0.5,  # Lower for more stable EOS detection
             top_p=1.0,
             do_sample=True,
             quality_mode=quality_mode,
@@ -456,14 +428,14 @@ class MLXFullPipeline:
         start = time.time()
 
         # Extract embeddings from PyTorch
-        initial_embeds, trailing_text_hidden, tts_pad_embed = self._extract_pytorch_inputs(
+        initial_embeds, trailing_text_hidden, tts_pad_embed = self._extract_inputs(
             text, speaker, instruct=instruct
         )
 
         # Setup config
         config = GenerateConfig(
             max_new_tokens=500,
-            temperature=0.7,
+            temperature=0.5,
             top_p=1.0,
             do_sample=True,
             quality_mode=quality_mode,
@@ -568,18 +540,17 @@ class MLXFullPipeline:
         wav_np = np.array(wav_mlx)
         return wav_np[0, 0, :]
 
-    def _get_or_create_pt_model(self):
-        """Get or create PyTorch model (used for text embedding extraction only)."""
-        if self._pt_model is None:
+    def _get_or_create_pt_decoder(self):
+        """Load PyTorch model for audio decoder only (pre-conv/upsample)."""
+        if self.pt_decoder is None:
             from qwen_tts import Qwen3TTSModel
             self._pt_model = Qwen3TTSModel.from_pretrained(
                 "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
                 device_map="cpu",
                 dtype=torch.bfloat16,
             )
-            # Store reference to decoder for audio decoding
             self.pt_decoder = self._pt_model.model.speech_tokenizer.model.decoder
-        return self._pt_model
+        return self.pt_decoder
 
     def generate_streaming(
         self,

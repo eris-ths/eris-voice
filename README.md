@@ -199,14 +199,22 @@ MLX migration cannot eliminate this sequential nature. What it can do:
 The architectural constraint is exactly why optimization matters:
 when you can't reduce the number of sequential steps,
 making each step cheaper has compounding returns.
+A 10ms saving per call compounds to 150ms per step (15 codebooks),
+seconds per utterance, and minutes over a conversation.
 
-### What would change the architecture itself?
+### Current work vs future directions
+
+**Current work: inference optimization within a fixed architecture.**
+The model weights, the sequential codebook structure, and the autoregressive
+loop are all given. We optimize the cost of executing them.
+
+**Future directions: model redesign.**
 
 - **Parallel codebook prediction** (SoundStorm-style): eliminates sequential CodePredictor calls. Requires model retraining.
 - **Smaller models with higher quality**: e.g., distillation of 1.7B into a faster architecture.
 - **Non-autoregressive TTS**: eliminates the generate loop entirely. Different model family.
 
-These are research directions, not implementation tasks.
+These change what the model *is*, not how fast it runs.
 
 ---
 

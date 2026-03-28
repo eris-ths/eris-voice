@@ -1,8 +1,8 @@
 # Optimization TODO - M3 MacBook Air 8GB
 
 > **Goal**: Real-time TTS (RTF 1.0x+) on 8GB M3 MacBook Air
-> **Status**: RTF 1.06x achieved (balanced mode) ✅
-> **Last Updated**: 2026-01-24
+> **Status**: RTF 1.0x achieved (high mode, Direct MCP) ✅
+> **Last Updated**: 2026-03-28
 
 ---
 
@@ -10,12 +10,12 @@
 
 ### Real-Time Factor (RTF)
 
-| Quality Mode | Codebooks | ms/step | RTF | Quality |
-|-------------|-----------|---------|-----|---------|
-| high | 15 | 101ms | 0.82x | ★★★★★ |
-| **balanced** | **11** | **79ms** | **1.06x** | ★★★★☆ |
-| fast | 7 | 60ms | 1.40x | ★★★☆☆ |
-| ultra_fast | 3 | 40ms | 2.08x | ★★☆☆☆ |
+| Quality Mode | Codebooks | RTF (Direct) | Quality | Notes |
+|-------------|-----------|--------------|---------|-------|
+| **high** | **15** | **0.4-0.7x** | ★★★★★ | **Required for 0.6B Japanese** |
+| balanced | 11 | 0.8-1.0x | ★★★☆☆ | Japanese quality degrades |
+| fast | 7 | 1.0-1.4x | ★★☆☆☆ | Not recommended |
+| ultra_fast | 3 | 1.4-2.0x | ★☆☆☆☆ | Unintelligible |
 
 ### Component Speedup
 
@@ -25,6 +25,9 @@
 | Audio Decoder | **45x** | ✅ Complete |
 | Quantizer | **3.5x** | ✅ Complete |
 | Talker Forward | **10.8x** | ✅ Complete |
+| KV Cache | **O(1)/step** | ✅ Complete (03/28) |
+| Attention | **mx.fast SDPA** | ✅ Complete (03/28) |
+| TextEncoder | **MLX native** | ✅ Complete (03/28) |
 
 ---
 
@@ -57,48 +60,86 @@
 ### Streaming
 - [x] **Sentence Chunking** - 2.7x faster TTFA
 
+### Phase 5: KV Cache + Attention Optimization (03/28)
+- [x] **Pre-allocated KV Cache** - concat O(n²) → slice O(1) (MLX-LM based)
+- [x] **mx.fast SDPA** - Metal-accelerated attention, native GQA
+- [x] **Dead code cleanup** - Removed duplicate KVCache, custom SDPA
+- [x] **mx.compile evaluation** - No benefit (mx.fast already Metal-optimized)
+
+### Phase 6: TextEncoder MLX Migration (03/28)
+- [x] **MLX TextEncoder** - Tokenizer + embedding + projection + token assembly
+- [x] **text_projection bias** - Extracted and applied (fc1_bias, fc2_bias)
+- [x] **Numerical validation** - max diff 0.007 vs PyTorch
+- [x] **Codebook embedding pre-computation** - @property → load_weights()
+
+### Phase 7: MCP + Voice Customization (03/28)
+- [x] **Direct MCP** - In-process pipeline (no HTTP overhead)
+- [x] **voice_presets.yaml** - 6 mood presets, hot-reloadable
+- [x] **instruct parameter** - Direct voice style control
+- [x] **max_steps 150** - Safe for M3 8GB Metal limit
+
 ---
 
 ## Remaining 🚧
 
-### Full MLX Pipeline Integration
-- [ ] **Tokenization Integration** - HuggingFace → MLX
-- [ ] **E2E MLX Pipeline** - Remove PyTorch dependency from generation
+### Audio Decoder Full MLX
+- [ ] **Pre-conv/Upsample → MLX** - Last PyTorch dependency
+  - Currently: ~1GB PyTorch model loaded for decoder only
+  - Impact: Eliminate PyTorch entirely, reduce startup time ~10s
 
-### Future Optimization
-- [ ] **mx.compile()** - Requires KVCache refactor to array-based
-  - Currently blocked by: KVCache is custom object, not array tree
-  - Expected impact: 5-15% speedup + memory improvement
+### Future Research
+- [ ] **TurboQuant/PolarQuant** - KV cache quantization (3.5-bit, 9x compression)
+  - Papers: arXiv:2504.19874, 2502.02617
+  - Impact: Enable 1.7B on 8GB or longer context on 0.6B
+- [ ] **1.7B Model** - Better quality at balanced mode (requires 16GB+ RAM)
 
 ### Low Priority
 - [ ] **Token-level Streaming** - Hook into generate() for true streaming
 - [ ] **Voice Clone Support** - Custom voice from reference audio
-- [ ] **Pre-Transformer → MLX** - Only 0.24s (<0.5% of total time)
 - [ ] **CoreML Conversion** - Apple Neural Engine
+
+---
+
+## Constraints (M3 8GB)
+
+```yaml
+Metal buffer limit: 4GB
+Max audio per generation: ~12.5s (150 steps at 12Hz)
+Long text strategy: streaming (sentence-level split)
+Quality requirement: high (15 codebooks) for Japanese
+temperature: 0.5 (reduces long vowel stretching)
+```
 
 ---
 
 ## Architecture
 
 ```
-Current Pipeline (Hybrid MLX):
-
 Text Input
     │
     ▼
 ┌─────────────────────────────────────────────────────┐
-│ MLX Generate Loop (166x speedup)                    │
-│  ├── Talker (28 layers + KVCache)                   │
-│  ├── codec_head → codebook[0]                       │
-│  └── CodePredictor (5 layers) → codebook[1-15]     │
+│ MLX TextEncoder (PyTorch-free)                      │
+│  ├── Tokenizer (transformers)                       │
+│  ├── text_embedding → text_projection (with bias)   │
+│  └── Token assembly (instruct + role + codec + text)│
 └─────────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────────┐
-│ MLX Decoder Pipeline                                │
-│  ├── Quantizer Decode (3.5x)                        │
-│  ├── Pre-conv + Upsample (PyTorch)                  │
-│  └── Audio Decoder (45x)                            │
+│ MLX Generate Loop (166x speedup)                    │
+│  ├── Talker (28 layers + Pre-allocated KVCache)     │
+│  ├── mx.fast SDPA (Metal + native GQA)              │
+│  ├── codec_head → codebook[0]                       │
+│  └── CodePredictor (5 layers) → codebook[1-15]      │
+└─────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ Audio Decoder Pipeline                              │
+│  ├── Quantizer Decode (3.5x, pre-computed codebook) │
+│  ├── Pre-conv + Upsample (PyTorch — last PT dep)    │
+│  └── Audio Decoder (45x MLX)                        │
 └─────────────────────────────────────────────────────┘
     │
     ▼
@@ -107,22 +148,4 @@ Audio Output (24kHz WAV)
 
 ---
 
-## Memory Usage (8GB Environment)
-
-```yaml
-Model Weights:
-  Talker: ~3.0GB (talker_weights_mlx.npz)
-  CodePredictor: ~0.5GB (code_predictor_weights_mlx.npz)
-  Decoder: ~0.3GB (decoder_weights_mlx.npz)
-  Quantizer: ~0.03GB (quantizer_weights_mlx.npz)
-  Total: ~3.8GB ✅
-
-Runtime:
-  KV Cache: ~0.5GB
-  Audio Buffer: ~0.3GB
-  Total Peak: ~4.6GB ✅ (Safe for 8GB)
-```
-
----
-
-*Updated by Eris 😈 - 2026-01-24*
+*Updated by Eris 😈 - 2026-03-28*

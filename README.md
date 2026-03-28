@@ -18,8 +18,11 @@ Achieves **real-time speech synthesis (RTF 1.0x+)** through MLX-native pipeline.
 | **RTF 1.0x+** | Real-time speech synthesis achieved |
 | **166x Generate Loop** | MLX-native autoregressive generation |
 | **45x Audio Decoder** | MLX conv1d acceleration |
-| **Quality Modes** | Speed/quality tradeoff: high/balanced/fast/ultra_fast |
-| **MCP Server** | Claude Code integration ready |
+| **Pre-allocated KV Cache** | O(1) per-step updates (MLX-LM based) |
+| **mx.fast SDPA** | Metal-accelerated attention with native GQA |
+| **MLX TextEncoder** | PyTorch-free text processing |
+| **Voice Presets** | YAML-based voice mood customization |
+| **Direct MCP** | In-process pipeline, no HTTP overhead |
 
 ---
 
@@ -27,27 +30,20 @@ Achieves **real-time speech synthesis (RTF 1.0x+)** through MLX-native pipeline.
 
 ### Real-Time Factor (RTF)
 
-| Quality Mode | Codebooks | ms/step | RTF | Quality |
-|-------------|-----------|---------|-----|---------|
-| high | 15 | ~100ms | 0.83x | ★★★★★ |
-| **balanced** | **11** | **~80ms** | **0.93-0.97x** | ★★★★☆ |
-| fast | 7 | ~60ms | 1.4x | ★★★☆☆ |
-| ultra_fast | 3 | ~40ms | 2.0x | ★★☆☆☆ |
+| Quality Mode | Codebooks | RTF (Direct) | Quality | Notes |
+|-------------|-----------|--------------|---------|-------|
+| **high** | **15** | **0.4-0.7x** | ★★★★★ | **Recommended for 0.6B** |
+| balanced | 11 | 0.8-1.0x | ★★★☆☆ | Japanese quality degrades |
+| fast | 7 | 1.0-1.4x | ★★☆☆☆ | Not recommended for Japanese |
+| ultra_fast | 3 | 1.4-2.0x | ★☆☆☆☆ | Unintelligible |
 
 > Environment: M3 MacBook Air 8GB Unified Memory
-
-### Test Results (balanced mode)
-
-| Text | Audio Duration | Generation Time | RTF |
-|------|---------------|-----------------|-----|
-| こんにちは。 | 2.48s | 2.56s | **0.97x** |
-| 私はエリス... | 5.68s | 5.84s | **0.97x** |
-| 今日はとても... | 3.84s | 4.15s | **0.93x** |
+> Note: 0.6B model requires `high` mode for intelligible Japanese speech.
 
 ### Speedup vs PyTorch CPU
 
-| Metric | PyTorch (CPU) | MLX | Speedup |
-|--------|---------------|-----|---------|
+| Component | PyTorch (CPU) | MLX | Speedup |
+|-----------|---------------|-----|---------|
 | RTF | 0.08x | 0.97x | **12x** |
 | Audio Decoder | baseline | 45x | **45x** |
 | Quantizer | baseline | 3.5x | **3.5x** |
@@ -60,7 +56,7 @@ Achieves **real-time speech synthesis (RTF 1.0x+)** through MLX-native pipeline.
 | Requirement | Version | Notes |
 |-------------|---------|-------|
 | **macOS** | 13.0+ | Apple Silicon (M1/M2/M3/M4) |
-| **Python** | 3.10+ | 3.11 recommended |
+| **Python** | 3.10+ | 3.11+ recommended |
 | **Memory** | 8GB+ | Model weights ~4GB |
 
 ---
@@ -87,24 +83,56 @@ python src/weight_converter.py
 python src/convert_talker_weights.py
 ```
 
-### 3. Start Server
-
-```bash
-python src/eris_voice_server.py
-```
-
-### 4. Use via MCP
+### 3. Use via MCP (Recommended)
 
 Configure in `~/.claude.json`:
 ```json
 {
   "mcpServers": {
     "eris-voice": {
-      "command": "python",
-      "args": ["/path/to/eris-voice/src/eris_voice_mcp.py"]
+      "command": "python3",
+      "args": ["/path/to/eris-voice/src/eris_voice_mcp_direct.py"]
     }
   }
 }
+```
+
+The Direct MCP server loads the pipeline in-process — no separate HTTP server needed.
+First call triggers model loading (~40s), subsequent calls are fast.
+
+### 4. Alternative: HTTP Server
+
+```bash
+python src/eris_voice_server.py
+```
+
+Then use `eris_voice_mcp.py` (HTTP client version) instead.
+
+---
+
+## Voice Customization
+
+### Voice Mood Presets
+
+Defined in `voice_presets.yaml` (hot-reloaded, no restart needed):
+
+| Mood | Description | Age Feel |
+|------|-------------|----------|
+| `default` | Standard anime voice | 20 |
+| `playful` | Bright, cheerful | 15 |
+| `calm` | Composed, explanatory | 25 |
+| `gentle` | Soft, warm | 20 |
+| `serious` | Clear, focused | 20 |
+| `whisper` | Soft whisper | 20 |
+
+### Usage
+
+```python
+# Use preset
+eris_speak(text="...", voice_mood="playful")
+
+# Direct instruct (overrides voice_mood)
+eris_speak(text="...", instruct="A cute anime girl speaking cheerfully")
 ```
 
 ---
@@ -114,14 +142,20 @@ Configure in `~/.claude.json`:
 ### MCP Tools
 
 ```python
-# Generate and play speech
+# Generate and play speech (high quality, default)
 eris_speak(text="こんにちは", speaker="ono_anna")
 
-# With quality mode (balanced = realtime)
-eris_speak(text="速く話して", quality_mode="fast")
+# With voice mood preset
+eris_speak(text="今日は良い天気ね", voice_mood="gentle")
+
+# Direct voice style instruction
+eris_speak(text="確実に進化してるわ", instruct="A 20-year-old cute Japanese anime girl voice")
 
 # Streaming (sentence-by-sentence)
 eris_speak_streaming(text="こんにちは。私はエリスよ。よろしくね。")
+
+# List voice moods
+eris_list_voice_moods()
 
 # Check status
 eris_status()
@@ -133,7 +167,7 @@ eris_status()
 # Generate speech
 curl -X POST http://localhost:8765/speak \
   -H "Content-Type: application/json" \
-  -d '{"text": "こんにちは", "speaker": "ono_anna", "quality_mode": "balanced"}'
+  -d '{"text": "こんにちは", "speaker": "ono_anna", "quality_mode": "high"}'
 
 # Status
 curl http://localhost:8765/status
@@ -141,48 +175,46 @@ curl http://localhost:8765/status
 
 ---
 
-## Quality Modes
-
-| Mode | Use Case | RTF |
-|------|----------|-----|
-| `high` | Best quality, offline generation | 0.82x |
-| `balanced` | **Default**, realtime playback | 1.06x |
-| `fast` | Quick previews, acceptable quality | 1.40x |
-| `ultra_fast` | Speed priority, reduced quality | 2.08x |
-
----
-
 ## Architecture
 
 ```
-Text Input (PyTorch tokenization)
+Text Input
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ MLX TextEncoder (PyTorch-free)                      │
+│  ├── Tokenizer (transformers AutoTokenizer)         │
+│  ├── text_embedding → text_projection (with bias)   │
+│  ├── codec_embedding (speaker/language tokens)      │
+│  └── Token assembly (instruct + role + text)        │
+└─────────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────────┐
 │ MLX Generate Loop (12x speedup vs PyTorch CPU)      │
 │                                                     │
 │  Prefill:                                           │
-│    Talker(initial_embeds) → past_hidden, code_0    │
+│    Talker(initial_embeds) → past_hidden, code_0     │
 │                                                     │
 │  Generate Loop:                                     │
-│    CodePredictor([past_hidden, embed(code_0)])     │
+│    CodePredictor([past_hidden, embed(code_0)])       │
 │      → codebook[1-15]                               │
-│    Talker(sum_embeds + trailing)                    │
+│    Talker(sum_embeds + trailing)                     │
 │      → new_past_hidden, new_code_0                  │
 │                                                     │
-│  Features:                                          │
-│    ├── Talker: 28-layer Transformer + KVCache      │
-│    ├── CodePredictor: 5-layer Transformer + KVCache│
-│    ├── suppress_tokens: 2048-3071 (EOS=2150 OK)    │
-│    └── Quality modes: high/balanced/fast/ultra_fast │
+│  Optimizations:                                     │
+│    ├── Pre-allocated KV Cache (O(1) per step)       │
+│    ├── mx.fast.scaled_dot_product_attention          │
+│    ├── Native GQA (no mx.repeat overhead)           │
+│    └── Quality modes: high/balanced/fast/ultra_fast  │
 └─────────────────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────────────────┐
-│ MLX Decoder Pipeline                                │
-│  ├── Quantizer Decode (3.5x)                        │
-│  ├── Pre-conv + Upsample (PyTorch)                  │
-│  └── Audio Decoder (45x)                            │
+│ Audio Decoder Pipeline                              │
+│  ├── Quantizer Decode (3.5x, pre-computed codebook) │
+│  ├── Pre-conv + Upsample (PyTorch — last PT dep)    │
+│  └── Audio Decoder (45x MLX)                        │
 └─────────────────────────────────────────────────────┘
     │
     ▼
@@ -196,22 +228,24 @@ Audio Output (24kHz WAV)
 ```
 .
 ├── src/
-│   ├── eris_voice_mcp.py      # MCP server (Claude Code)
-│   ├── eris_voice_server.py   # HTTP server (FastAPI)
-│   ├── mlx_generate.py        # Generate loop (166x)
-│   ├── mlx_talker.py          # MLX Talker model
-│   ├── mlx_code_predictor.py  # MLX CodePredictor
-│   ├── mlx_decoder_v2.py      # MLX Audio Decoder (45x)
-│   ├── mlx_quantizer.py       # MLX Quantizer (3.5x)
-│   ├── mlx_kv_cache.py        # KV Cache for inference
-│   ├── mlx_sampling.py        # Sampling utilities
-│   └── streaming_prototype.py # Sentence-level streaming
+│   ├── eris_voice_mcp_direct.py  # MCP server (Direct, recommended)
+│   ├── eris_voice_mcp.py         # MCP server (HTTP client)
+│   ├── eris_voice_server.py      # HTTP server (FastAPI)
+│   ├── mlx_text_encoder.py       # MLX TextEncoder (PyTorch-free)
+│   ├── mlx_pipeline.py           # Full pipeline orchestration
+│   ├── mlx_generate.py           # Generate loop (166x)
+│   ├── mlx_talker.py             # MLX Talker (28 layers)
+│   ├── mlx_code_predictor.py     # MLX CodePredictor (5 layers)
+│   ├── mlx_decoder_v2.py         # MLX Audio Decoder (45x)
+│   ├── mlx_quantizer.py          # MLX Quantizer (3.5x)
+│   ├── mlx_kv_cache.py           # Pre-allocated KV Cache
+│   └── mlx_sampling.py           # Sampling utilities
+├── voice_presets.yaml             # Voice mood presets (YAML)
+├── text_projection_bias.npz       # TextEncoder bias weights
 ├── docs/
-│   ├── generate_loop_mlx_tasks.md  # Progress report
-│   └── BENCHMARKS.md               # Detailed benchmarks
 ├── tests/
-├── archive/                   # Experimental code
-└── *.npz                      # MLX weights (generated)
+├── archive/
+└── *.npz                          # MLX weights (generated)
 ```
 
 ---
@@ -235,19 +269,25 @@ Audio Output (24kHz WAV)
 |---------|--------|
 | RTF 1.0x (Real-time) | ✅ Complete |
 | MLX Generate Loop | ✅ Complete (166x) |
+| Pre-allocated KV Cache | ✅ Complete (O(1)) |
+| mx.fast SDPA | ✅ Complete (Metal) |
+| MLX TextEncoder | ✅ Complete |
+| Codebook Pre-computation | ✅ Complete |
+| Voice Mood Presets | ✅ Complete |
+| Direct MCP Server | ✅ Complete |
 | Quality Modes | ✅ Complete |
-| MCP Server | ✅ Complete |
-| HTTP Server | ✅ Complete |
-| Full MLX Pipeline | 🚧 In Progress |
-| mx.compile() | 📋 Planned |
+| Audio Decoder full MLX | 🚧 Pre-conv/upsample still PyTorch |
+| TurboQuant KV Cache | 📋 Research (PolarQuant paper) |
+| 1.7B Model Support | 📋 Requires 16GB+ RAM |
 
 ---
 
 ## Limitations
 
 - **Apple Silicon Only**: MLX requires M1/M2/M3/M4
-- **Hybrid Pipeline**: Still uses PyTorch for tokenization and some pre-processing
-- **Memory**: Model weights require ~4GB RAM
+- **0.6B Model**: Requires `high` quality mode (15 codebooks) for Japanese
+- **Max ~12.5s per generation**: M3 8GB Metal buffer limit (use streaming for longer text)
+- **Audio Decoder**: Pre-conv/upsample still uses PyTorch (~1GB memory)
 
 ---
 
@@ -270,6 +310,7 @@ This is **experimental research software** provided "as is" without warranty.
 
 - **[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** by Alibaba (Apache 2.0)
 - **[MLX](https://github.com/ml-explore/mlx)** by Apple
+- **[MLX-LM](https://github.com/ml-explore/mlx-examples)** KV Cache reference implementation
 
 ## Authors
 

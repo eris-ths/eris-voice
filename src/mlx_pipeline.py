@@ -22,9 +22,6 @@ os.environ["OMP_NUM_THREADS"] = "8"
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-import torch
-torch.set_num_threads(8)
-
 from transformers import AutoTokenizer
 
 from mlx_generate import MLXGenerateLoop, GenerateConfig, QUALITY_PRESETS
@@ -33,6 +30,7 @@ from mlx_code_predictor import Qwen3TTSCodePredictorMLX, CodePredictorConfig, lo
 from mlx_decoder_v2 import Qwen3TTSDecoderMLX
 from mlx_quantizer import SplitResidualVectorQuantizerMLX
 from mlx_text_encoder import MLXTextEncoder
+from mlx_pre_decoder import MLXPreDecoder
 
 
 # Speaker tokens (from Qwen3-TTS)
@@ -99,8 +97,9 @@ class MLXFullPipeline:
         self.generator = None
         self.mlx_decoder = None
         self.mlx_quantizer = None
+        self.mlx_pre_decoder = None
 
-        # PyTorch model (only for audio decoder pre-conv/upsample)
+        # PyTorch model (kept as fallback, not loaded by default)
         self._pt_model = None
         self.pt_decoder = None
 
@@ -164,9 +163,12 @@ class MLXFullPipeline:
         print("  Loading MLX TextEncoder...")
         self.text_encoder = MLXTextEncoder(self.talker)
 
-        # 7. PyTorch model (only for audio decoder pre-conv/upsample — lazy loaded)
-        print("  Loading PyTorch decoder...")
-        self._get_or_create_pt_decoder()
+        # 7. MLX PreDecoder (replaces PyTorch pre-conv/transformer/upsample)
+        print("  Loading MLX PreDecoder...")
+        self.mlx_pre_decoder = MLXPreDecoder()
+        pre_decoder_weights_path = self.weights_dir / "pre_decoder_weights_mlx.npz"
+        pre_decoder_weights = dict(np.load(str(pre_decoder_weights_path)))
+        self.mlx_pre_decoder.load_weights(pre_decoder_weights)
 
         self._loaded = True
         print("MLX Full Pipeline loaded!")
@@ -253,31 +255,12 @@ class MLXFullPipeline:
         # MLX Quantizer decode
         hidden_mlx = self.mlx_quantizer.decode(codes)
         mx.eval(hidden_mlx)
-        hidden_np = np.array(hidden_mlx)
 
-        # PyTorch pre-processing
-        with torch.no_grad():
-            hidden = torch.from_numpy(hidden_np).to(dtype=torch.bfloat16)
+        # MLX PreDecoder (pre-conv + pre-transformer + upsample)
+        hidden_mlx = self.mlx_pre_decoder(hidden_mlx)
+        mx.eval(hidden_mlx)
 
-            # Pre-conv
-            hidden = self.pt_decoder.pre_conv(hidden).transpose(1, 2)
-
-            # Pre-transformer (if exists)
-            if self.pt_decoder.pre_transformer is not None:
-                hidden = self.pt_decoder.pre_transformer(
-                    inputs_embeds=hidden
-                ).last_hidden_state
-                hidden = hidden.permute(0, 2, 1)
-
-            # Upsample
-            for blocks in self.pt_decoder.upsample:
-                for block in blocks:
-                    hidden = block(hidden)
-
-        # MLX decoder
-        hidden_np = hidden.detach().cpu().float().numpy()
-        hidden_mlx = mx.array(hidden_np)
-
+        # MLX Audio Decoder
         wav_mlx = self.mlx_decoder.decoder_conv0(hidden_mlx)
         for block in self.mlx_decoder.decoder_blocks:
             wav_mlx = block(wav_mlx)
@@ -504,31 +487,12 @@ class MLXFullPipeline:
         # MLX Quantizer decode
         hidden_mlx = self.mlx_quantizer.decode(codes)
         mx.eval(hidden_mlx)
-        hidden_np = np.array(hidden_mlx)
 
-        # PyTorch pre-processing
-        with torch.no_grad():
-            hidden = torch.from_numpy(hidden_np).to(dtype=torch.bfloat16)
+        # MLX PreDecoder (pre-conv + pre-transformer + upsample)
+        hidden_mlx = self.mlx_pre_decoder(hidden_mlx)
+        mx.eval(hidden_mlx)
 
-            # Pre-conv
-            hidden = self.pt_decoder.pre_conv(hidden).transpose(1, 2)
-
-            # Pre-transformer (if exists)
-            if self.pt_decoder.pre_transformer is not None:
-                hidden = self.pt_decoder.pre_transformer(
-                    inputs_embeds=hidden
-                ).last_hidden_state
-                hidden = hidden.permute(0, 2, 1)
-
-            # Upsample
-            for blocks in self.pt_decoder.upsample:
-                for block in blocks:
-                    hidden = block(hidden)
-
-        # MLX decoder
-        hidden_np = hidden.detach().cpu().float().numpy()
-        hidden_mlx = mx.array(hidden_np)
-
+        # MLX Audio Decoder
         wav_mlx = self.mlx_decoder.decoder_conv0(hidden_mlx)
         for block in self.mlx_decoder.decoder_blocks:
             wav_mlx = block(wav_mlx)
@@ -540,17 +504,6 @@ class MLXFullPipeline:
         wav_np = np.array(wav_mlx)
         return wav_np[0, 0, :]
 
-    def _get_or_create_pt_decoder(self):
-        """Load PyTorch model for audio decoder only (pre-conv/upsample)."""
-        if self.pt_decoder is None:
-            from qwen_tts import Qwen3TTSModel
-            self._pt_model = Qwen3TTSModel.from_pretrained(
-                "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-                device_map="cpu",
-                dtype=torch.bfloat16,
-            )
-            self.pt_decoder = self._pt_model.model.speech_tokenizer.model.decoder
-        return self.pt_decoder
 
     def generate_streaming(
         self,

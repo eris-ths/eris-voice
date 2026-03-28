@@ -190,10 +190,11 @@ Text Input
     v
 [MLX Generate Loop] -- 12x speedup vs PyTorch CPU
     Prefill:
-      Talker(initial_embeds) -> past_hidden, code_0
-    Generate Loop:
-      CodePredictor -> codebook[1-15]
-      Talker -> new_past_hidden, new_code_0
+      Talker(initial_embeds) -> code_0
+    Generate Loop (per step):
+      1. CodePredictor(past_hidden, code_0) -> codebook[1-15]
+      2. sum_embeds = embed(code_0) + embed(codes[1-15]) + trailing_text
+      3. Talker(sum_embeds) -> new_code_0, new_past_hidden
     Optimizations:
       - Pre-allocated KV Cache (O(1) per step)
       - mx.fast.scaled_dot_product_attention

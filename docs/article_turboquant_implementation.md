@@ -199,7 +199,7 @@ MLX のプリミティブだけで完結する。外部依存なし。
 - [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874) (Zandieh et al., ICLR 2026)
 - [QJL: 1-Bit Quantized JL Transform for KV Cache Quantization](https://arxiv.org/abs/2406.03482) (Zandieh et al., NeurIPS 2024)
 - [MLX Framework](https://github.com/ml-explore/mlx) (Apple)
-- [MLX-LM QuantizedKVCache](https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/cache.py)
+- [MLX-LM QuantizedKVCache](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py)
 
 ---
 

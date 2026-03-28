@@ -179,45 +179,34 @@ curl http://localhost:8765/status
 
 ```
 Text Input
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│ MLX TextEncoder (PyTorch-free)                               │
-│  ├── Tokenizer (transformers AutoTokenizer)                  │
-│  ├── text_embedding → text_projection (with bias)            │
-│  ├── codec_embedding (speaker/language tokens)               │
-│  └── Token assembly (instruct + role + text)                 │
-└──────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│ MLX Generate Loop (12x speedup vs PyTorch CPU)               │
-│                                                              │
-│  Prefill:                                                    │
-│    Talker(initial_embeds) → past_hidden, code_0              │
-│                                                              │
-│  Generate Loop:                                              │
-│    CodePredictor([past_hidden, embed(code_0)])                │
-│      → codebook[1-15]                                        │
-│    Talker(sum_embeds + trailing)                              │
-│      → new_past_hidden, new_code_0                           │
-│                                                              │
-│  Optimizations:                                              │
-│    ├── Pre-allocated KV Cache (O(1) per step)                │
-│    ├── mx.fast.scaled_dot_product_attention                   │
-│    ├── Native GQA (no mx.repeat overhead)                    │
-│    └── Quality modes: high/balanced/fast/ultra_fast           │
-└──────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│ Audio Decoder Pipeline                                       │
-│  ├── Quantizer Decode (3.5x, pre-computed codebook)          │
-│  ├── PreDecoder (pre-conv + 8L transformer + 2x upsample)   │
-│  └── Audio Decoder (45x, SnakeBeta + conv1d)                 │
-└──────────────────────────────────────────────────────────────┘
-    │
-    ▼
+    |
+    v
+[MLX TextEncoder]
+    Tokenizer (transformers)
+    text_embedding -> text_projection (with bias)
+    codec_embedding (speaker/language tokens)
+    Token assembly (instruct + role + text)
+    |
+    v
+[MLX Generate Loop] -- 12x speedup vs PyTorch CPU
+    Prefill:
+      Talker(initial_embeds) -> past_hidden, code_0
+    Generate Loop:
+      CodePredictor -> codebook[1-15]
+      Talker -> new_past_hidden, new_code_0
+    Optimizations:
+      - Pre-allocated KV Cache (O(1) per step)
+      - mx.fast.scaled_dot_product_attention
+      - Native GQA (no mx.repeat overhead)
+      - Quality modes: high/balanced/fast/ultra_fast
+    |
+    v
+[Audio Decoder Pipeline]
+    Quantizer Decode (3.5x, pre-computed codebook)
+    PreDecoder (pre-conv + 8L transformer + 2x upsample)
+    Audio Decoder (45x, SnakeBeta + conv1d)
+    |
+    v
 Audio Output (24kHz WAV)
 ```
 

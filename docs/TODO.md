@@ -119,33 +119,27 @@ temperature: 0.5 (reduces long vowel stretching)
 
 ```
 Text Input
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│ MLX TextEncoder (PyTorch-free)                               │
-│  ├── Tokenizer (transformers)                                │
-│  ├── text_embedding → text_projection (with bias)            │
-│  └── Token assembly (instruct + role + codec + text)         │
-└──────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│ MLX Generate Loop (166x speedup)                             │
-│  ├── Talker (28 layers + Pre-allocated KVCache)              │
-│  ├── mx.fast SDPA (Metal + native GQA)                       │
-│  ├── codec_head → codebook[0]                                │
-│  └── CodePredictor (5 layers) → codebook[1-15]               │
-└──────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│ Audio Decoder Pipeline                                       │
-│  ├── Quantizer Decode (3.5x, pre-computed codebook)          │
-│  ├── PreDecoder (pre-conv + 8L transformer + 2x upsample)   │
-│  └── Audio Decoder (45x, SnakeBeta + conv1d)                 │
-└──────────────────────────────────────────────────────────────┘
-    │
-    ▼
+    |
+    v
+[MLX TextEncoder]
+    Tokenizer (transformers)
+    text_embedding -> text_projection (with bias)
+    Token assembly (instruct + role + codec + text)
+    |
+    v
+[MLX Generate Loop] -- 166x speedup
+    Talker (28 layers + Pre-allocated KVCache)
+    mx.fast SDPA (Metal + native GQA)
+    codec_head -> codebook[0]
+    CodePredictor (5 layers) -> codebook[1-15]
+    |
+    v
+[Audio Decoder Pipeline]
+    Quantizer Decode (3.5x, pre-computed codebook)
+    PreDecoder (pre-conv + 8L transformer + 2x upsample)
+    Audio Decoder (45x, SnakeBeta + conv1d)
+    |
+    v
 Audio Output (24kHz WAV)
 ```
 

@@ -15,8 +15,22 @@ Memory: ~4-5 bit effective per channel (vs 32-bit float32 = 6-8x compression)
 """
 
 from typing import Tuple, Optional
+from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
+
+
+def load_lloyd_max_codebook(dim: int, bits: int) -> Optional[mx.array]:
+    """Load precomputed Lloyd-Max codebook for given dim and bits."""
+    codebook_path = Path(__file__).parent.parent / "lloyd_max_codebooks.npz"
+    if not codebook_path.exists():
+        return None
+    data = np.load(str(codebook_path))
+    key = f"dim{dim}_bits{bits}"
+    if key not in data:
+        return None
+    return mx.array(data[key])
 
 
 class PolarQuantKVCache:
@@ -32,17 +46,28 @@ class PolarQuantKVCache:
     """
 
     def __init__(self, head_dim: int = 128, step: int = 256,
-                 bits: int = 4, group_size: int = 32):
+                 bits: int = 4, group_size: int = 32,
+                 use_lloyd_max: bool = False):
         self.head_dim = head_dim
         self.step = step
         self.bits = bits
         self.group_size = group_size
+        self.use_lloyd_max = use_lloyd_max
         self.offset: int = 0
 
         # Random orthogonal rotation matrix (computed once)
         random_matrix = mx.random.normal((head_dim, head_dim))
         self._Q, _ = mx.linalg.qr(random_matrix, stream=mx.cpu)
         mx.eval(self._Q)
+
+        # Lloyd-Max codebook (precomputed, optional)
+        self._codebook = None
+        if use_lloyd_max:
+            self._codebook = load_lloyd_max_codebook(head_dim, bits)
+            if self._codebook is not None:
+                mx.eval(self._codebook)
+            else:
+                print(f"Warning: Lloyd-Max codebook not found for dim={head_dim}, bits={bits}. Falling back to uniform.")
 
         # Quantized storage
         self._k_quant = None  # (B, n_kv_heads, allocated, head_dim // el_per_int)
@@ -55,7 +80,7 @@ class PolarQuantKVCache:
         self._v_biases = None
         self._v_radius = None
 
-    def _quantize_vector(self, v: mx.array) -> Tuple[mx.array, mx.array, mx.array, mx.array]:
+    def _quantize_vector(self, v: mx.array):
         """
         Quantize a vector using PolarQuant.
 
@@ -63,7 +88,8 @@ class PolarQuantKVCache:
             v: (B, n_kv_heads, seq, head_dim) float32
 
         Returns:
-            (quant_data, scales, biases, radius)
+            Lloyd-Max mode: (indices, None, None, radius)
+            Uniform mode: (quant_data, scales, biases, radius)
         """
         # 1. Rotate
         v_rot = v @ self._Q  # (B, H, S, D)
@@ -72,13 +98,20 @@ class PolarQuantKVCache:
         radius = mx.sqrt((v_rot * v_rot).sum(axis=-1, keepdims=True))  # (B, H, S, 1)
         v_unit = v_rot / (radius + 1e-8)  # (B, H, S, D) in [-1, 1]
 
-        # 3. Quantize normalized components
-        quant_data, scales, biases = mx.quantize(v_unit, group_size=self.group_size, bits=self.bits)
-
-        # 4. Store radius as float16
-        radius = radius.astype(mx.float16)
-
-        return quant_data, scales, biases, radius
+        # 3. Quantize
+        if self.use_lloyd_max and self._codebook is not None:
+            # Lloyd-Max: nearest level lookup
+            # codebook: (n_levels,), v_unit: (B, H, S, D)
+            # Find nearest level for each element
+            diffs = mx.abs(v_unit[..., None] - self._codebook)  # (B, H, S, D, n_levels)
+            indices = mx.argmin(diffs, axis=-1).astype(mx.uint8)  # (B, H, S, D)
+            radius = radius.astype(mx.float16)
+            return indices, None, None, radius
+        else:
+            # Uniform: mx.quantize
+            quant_data, scales, biases = mx.quantize(v_unit, group_size=self.group_size, bits=self.bits)
+            radius = radius.astype(mx.float16)
+            return quant_data, scales, biases, radius
 
     def _dequantize_vector(self, quant_data, scales, biases, radius) -> mx.array:
         """
@@ -87,14 +120,18 @@ class PolarQuantKVCache:
         Returns:
             (B, n_kv_heads, seq, head_dim) float32
         """
-        # 1. Dequantize unit vector
-        v_unit = mx.dequantize(quant_data, scales, biases,
-                               group_size=self.group_size, bits=self.bits)
+        if self.use_lloyd_max and self._codebook is not None:
+            # Lloyd-Max: lookup levels by indices
+            v_unit = self._codebook[quant_data]  # (B, H, S, D)
+        else:
+            # Uniform: mx.dequantize
+            v_unit = mx.dequantize(quant_data, scales, biases,
+                                   group_size=self.group_size, bits=self.bits)
 
-        # 2. Rescale by radius
+        # Rescale by radius
         v_rot = v_unit * radius.astype(mx.float32)
 
-        # 3. Inverse rotate
+        # Inverse rotate
         v = v_rot @ self._Q.T
 
         return v
@@ -168,10 +205,12 @@ class MultiLayerPolarQuantKVCache:
     """Manages PolarQuant KV caches for multiple transformer layers."""
 
     def __init__(self, num_layers: int, head_dim: int = 128,
-                 bits: int = 4, group_size: int = 32):
+                 bits: int = 4, group_size: int = 32,
+                 use_lloyd_max: bool = False):
         self.num_layers = num_layers
         self.caches = [
-            PolarQuantKVCache(head_dim=head_dim, bits=bits, group_size=group_size)
+            PolarQuantKVCache(head_dim=head_dim, bits=bits, group_size=group_size,
+                              use_lloyd_max=use_lloyd_max)
             for _ in range(num_layers)
         ]
 
@@ -281,6 +320,28 @@ def test_polar_quant():
     cos_sim = float((k * all_k).sum() / (mx.sqrt((k*k).sum()) * mx.sqrt((all_k*all_k).sum())))
     print(f"  Mean abs error: {k_err:.6f}")
     print(f"  Cosine similarity: {cos_sim:.6f}")
+
+    # Test 6: Lloyd-Max vs Uniform comparison
+    print("\nTest 6: Lloyd-Max vs Uniform (3-bit)")
+
+    k = mx.random.normal((1, 8, 50, 128)) * 0.1
+
+    # Uniform 3-bit
+    cache_uniform = PolarQuantKVCache(head_dim=128, bits=3, use_lloyd_max=False)
+    all_k_u, _ = cache_uniform.update_and_fetch(k, k)
+    mx.eval(all_k_u)
+    cos_u = float((k * all_k_u).sum() / (mx.sqrt((k*k).sum()) * mx.sqrt((all_k_u*all_k_u).sum())))
+
+    # Lloyd-Max 3-bit
+    cache_lm = PolarQuantKVCache(head_dim=128, bits=3, use_lloyd_max=True)
+    all_k_lm, _ = cache_lm.update_and_fetch(k, k)
+    mx.eval(all_k_lm)
+    cos_lm = float((k * all_k_lm).sum() / (mx.sqrt((k*k).sum()) * mx.sqrt((all_k_lm*all_k_lm).sum())))
+
+    print(f"  Uniform 3-bit:   cosine sim = {cos_u:.6f}")
+    print(f"  Lloyd-Max 3-bit: cosine sim = {cos_lm:.6f}")
+    if cos_lm > cos_u:
+        print(f"  Lloyd-Max improvement: +{(cos_lm - cos_u)*100:.4f}%")
 
     print("\n✅ PolarQuant KV Cache tests passed!")
 

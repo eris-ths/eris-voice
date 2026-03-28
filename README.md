@@ -175,6 +175,41 @@ curl http://localhost:8765/status
 
 ---
 
+## Design Philosophy
+
+### Why optimize if the bottleneck is architectural?
+
+Qwen3-TTS uses **sequential** codebook prediction: the CodePredictor generates
+15 acoustic codebooks one at a time, not in parallel. This means the per-step
+cost is fixed at:
+
+```
+1 step = Talker(1x) + CodePredictor(up to 15x) + Decoder(1x)
+```
+
+MLX migration cannot eliminate this sequential nature. What it can do:
+
+| Layer | What we changed | What remains |
+|-------|----------------|--------------|
+| **Per-call cost** | Metal SDPA, PyTorch elimination, pre-allocated KV | Each call still happens |
+| **History cost** | KV Cache O(n^2) -> O(1) per step | Sequence length still grows |
+| **Call count** | Quality modes (15/11/7/3 codebooks) | Trade-off with audio quality |
+| **Memory bandwidth** | TurboQuant KV compression (planned) | Bandwidth ceiling of HW |
+
+The architectural constraint is exactly why optimization matters:
+when you can't reduce the number of sequential steps,
+making each step cheaper has compounding returns.
+
+### What would change the architecture itself?
+
+- **Parallel codebook prediction** (SoundStorm-style): eliminates sequential CodePredictor calls. Requires model retraining.
+- **Smaller models with higher quality**: e.g., distillation of 1.7B into a faster architecture.
+- **Non-autoregressive TTS**: eliminates the generate loop entirely. Different model family.
+
+These are research directions, not implementation tasks.
+
+---
+
 ## Architecture
 
 ```

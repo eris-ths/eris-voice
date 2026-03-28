@@ -239,7 +239,7 @@ class MLXFullPipeline:
             codes_np = codes_np[:, :eos_pos, :]
 
         # Limit to reasonable length (prevent memory issues)
-        max_steps = 100  # ~8 seconds of audio at 12Hz
+        max_steps = 150  # ~12.5 seconds of audio at 12Hz (M3 8GB Metal limit)
         if codes_np.shape[1] > max_steps:
             codes_np = codes_np[:, :max_steps, :]
 

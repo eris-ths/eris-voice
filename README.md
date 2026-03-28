@@ -181,34 +181,51 @@ curl http://localhost:8765/status
 Text Input
     |
     v
-[MLX TextEncoder]
-    Tokenizer (transformers)
-    text_embedding -> text_projection (with bias)
+[MLX TextEncoder] -- PyTorch-free
+    Tokenizer (Qwen2TokenizerFast, transformers)
+    text_embedding -> text_projection (2048->1024, with bias)
     codec_embedding (speaker/language tokens)
-    Token assembly (instruct + role + text)
+    Token assembly (instruct + role + codec prefix + text)
     |
     v
 [MLX Generate Loop] -- 12x speedup vs PyTorch CPU
+    Talker: 28-layer Transformer (GQA, RoPE)
+      - not hybrid -- pure autoregressive Transformer
+      - 16 heads, 8 KV heads (Grouped Query Attention)
+    CodePredictor: 5-layer Transformer, 15 separate LM heads
+      - autoregressive per-codebook prediction (not parallel)
+      - each head predicts one codebook sequentially
+
     Prefill:
       Talker(initial_embeds) -> code_0
     Generate Loop (per step):
       1. CodePredictor(past_hidden, code_0) -> codebook[1-15]
       2. sum_embeds = embed(code_0) + embed(codes[1-15]) + trailing_text
       3. Talker(sum_embeds) -> new_code_0, new_past_hidden
+
     Optimizations:
-      - Pre-allocated KV Cache (O(1) per step)
-      - mx.fast.scaled_dot_product_attention
+      - Pre-allocated KV Cache, O(1) per step (MLX-LM based)
+      - mx.fast.scaled_dot_product_attention (Metal)
       - Native GQA (no mx.repeat overhead)
-      - Quality modes: high/balanced/fast/ultra_fast
     |
     v
 [Audio Decoder Pipeline]
+    Codec: Qwen3TTSTokenizerV2 (custom RVQ, not Encodec/DAC/Mimi)
+      - SplitResidualVQ: 1 semantic + 15 acoustic codebooks
+      - 2048 entries x 256 dims per codebook
+      - 12 Hz frame rate
     Quantizer Decode (3.5x, pre-computed codebook)
-    PreDecoder (pre-conv + 8L transformer + 2x upsample)
-    Audio Decoder (45x, SnakeBeta + conv1d)
+    PreDecoder (CausalConv + 8L Transformer + 2-stage ConvTranspose/ConvNeXt)
+    Audio Decoder (45x, SnakeBeta activation + conv1d stack)
     |
     v
 Audio Output (24kHz WAV)
+
+Quality Modes -- achieved by codebook count reduction:
+    high:       15 acoustic codebooks (required for 0.6B Japanese)
+    balanced:   11 acoustic codebooks (4 zero-padded)
+    fast:        7 acoustic codebooks (8 zero-padded)
+    ultra_fast:  3 acoustic codebooks (12 zero-padded)
 ```
 
 ---

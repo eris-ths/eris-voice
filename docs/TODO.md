@@ -80,12 +80,15 @@
 
 ---
 
-## Remaining 🚧
+### Phase 8: Audio Decoder Full MLX (03/28)
+- [x] **Pre-conv/Upsample → MLX** - PyTorch completely eliminated
+  - `mlx_pre_decoder.py`: CausalConv + 8-layer Transformer + 2-stage ConvTranspose/ConvNeXt
+  - Load time: 25s → 16.5s
+  - 117 weight tensors extracted (202MB pre_decoder_weights_mlx.npz)
 
-### Audio Decoder Full MLX
-- [ ] **Pre-conv/Upsample → MLX** - Last PyTorch dependency
-  - Currently: ~1GB PyTorch model loaded for decoder only
-  - Impact: Eliminate PyTorch entirely, reduce startup time ~10s
+---
+
+## Remaining 🚧
 
 ### Future Research
 - [ ] **TurboQuant/PolarQuant** - KV cache quantization (3.5-bit, 9x compression)
@@ -137,9 +140,9 @@ Text Input
     ▼
 ┌─────────────────────────────────────────────────────┐
 │ Audio Decoder Pipeline                              │
-│  ├── Quantizer Decode (3.5x, pre-computed codebook) │
-│  ├── Pre-conv + Upsample (PyTorch — last PT dep)    │
-│  └── Audio Decoder (45x MLX)                        │
+│  ├── Quantizer Decode (3.5x, pre-computed codebook)  │
+│  ├── PreDecoder (pre-conv + 8L transformer + upsample) │
+│  └── Audio Decoder (45x)                             │
 └─────────────────────────────────────────────────────┘
     │
     ▼

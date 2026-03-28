@@ -213,7 +213,7 @@ Text Input
 ┌─────────────────────────────────────────────────────┐
 │ Audio Decoder Pipeline                              │
 │  ├── Quantizer Decode (3.5x, pre-computed codebook) │
-│  ├── Pre-conv + Upsample (PyTorch — last PT dep)    │
+│  ├── MLX PreDecoder (pre-conv + 8L transformer + upsample) │
 │  └── Audio Decoder (45x MLX)                        │
 └─────────────────────────────────────────────────────┘
     │
@@ -236,6 +236,7 @@ Audio Output (24kHz WAV)
 │   ├── mlx_generate.py           # Generate loop (166x)
 │   ├── mlx_talker.py             # MLX Talker (28 layers)
 │   ├── mlx_code_predictor.py     # MLX CodePredictor (5 layers)
+│   ├── mlx_pre_decoder.py        # MLX PreDecoder (pre-conv + 8L transformer + upsample)
 │   ├── mlx_decoder_v2.py         # MLX Audio Decoder (45x)
 │   ├── mlx_quantizer.py          # MLX Quantizer (3.5x)
 │   ├── mlx_kv_cache.py           # Pre-allocated KV Cache
@@ -276,7 +277,7 @@ Audio Output (24kHz WAV)
 | Voice Mood Presets | ✅ Complete |
 | Direct MCP Server | ✅ Complete |
 | Quality Modes | ✅ Complete |
-| Audio Decoder full MLX | 🚧 Pre-conv/upsample still PyTorch |
+| Audio Decoder full MLX | ✅ Complete (PyTorch eliminated) |
 | TurboQuant KV Cache | 📋 Research (PolarQuant paper) |
 | 1.7B Model Support | 📋 Requires 16GB+ RAM |
 
@@ -287,7 +288,7 @@ Audio Output (24kHz WAV)
 - **Apple Silicon Only**: MLX requires M1/M2/M3/M4
 - **0.6B Model**: Requires `high` quality mode (15 codebooks) for Japanese
 - **Max ~12.5s per generation**: M3 8GB Metal buffer limit (use streaming for longer text)
-- **Audio Decoder**: Pre-conv/upsample still uses PyTorch (~1GB memory)
+- **PyTorch-free**: Entire pipeline runs on MLX. `transformers` (tokenizer only) is the sole non-MLX dependency
 
 ---
 
